@@ -1,0 +1,5 @@
+.*.swp
+*.oar
+*.log
+*.pyc
+.vagrant

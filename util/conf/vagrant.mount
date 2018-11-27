@@ -1,0 +1,11 @@
+[Unit]
+Description=Vagrant default sync folder
+
+[Mount]
+What=vagrant
+Where=/vagrant
+Type=vboxsf
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target

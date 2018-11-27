@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+DOCKER_NAME="onos"
+
+sudo docker exec -ti $DOCKER_NAME /root/client.sh "$@"
