@@ -1,3 +1,4 @@
+```
 CLI ONOS i instalacja apki:
 
 portfel@black:~/ftplb$ vagrant up
@@ -93,4 +94,4 @@ ftp> dir
 ftp> exit
 221 Goodbye.
 mininet> 
-
+```
