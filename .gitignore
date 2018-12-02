@@ -3,3 +3,7 @@
 *.log
 *.pyc
 .vagrant
+*.jar
+target
+.idea
+*.iml
