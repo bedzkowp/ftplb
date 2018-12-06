@@ -1,5 +1,7 @@
 [Unit]
 Description=Vagrant default sync folder
+Wants=virtualbox-guest-utils.service
+After=virtualbox-guest-utils.service
 
 [Mount]
 What=vagrant
