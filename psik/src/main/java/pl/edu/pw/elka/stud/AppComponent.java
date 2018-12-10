@@ -17,22 +17,16 @@ package pl.edu.pw.elka.stud;
 
 import org.onlab.packet.*;
 import org.onlab.rest.AbstractWebApplication;
-import org.onlab.rest.JsonBodyWriter;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
 import org.onosproject.net.*;
-import org.onosproject.net.config.NetworkConfigService;
 import org.onosproject.net.device.DeviceService;
 import org.onosproject.net.flow.*;
-import org.onosproject.net.flow.criteria.IPProtocolCriterion;
-import org.onosproject.net.flow.instructions.Instruction;
-import org.onosproject.net.flow.instructions.L3ModificationInstruction;
 import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
 import org.onosproject.net.group.GroupService;
 import org.onosproject.net.host.*;
-import org.onosproject.net.neighbour.NeighbourResolutionService;
 import org.onosproject.net.packet.*;
 import org.onosproject.net.proxyarp.ProxyArpStoreDelegate;
 import org.onosproject.net.topology.TopologyService;
@@ -55,7 +49,7 @@ import java.util.*;
  * Skeletal ONOS application component.
  */
 @Component(immediate = true)
-public class AppComponent extends AbstractWebApplication {
+public class AppComponent {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
 
@@ -83,11 +77,8 @@ public class AppComponent extends AbstractWebApplication {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowRuleService flowRuleService;
 
-    @Reference(cardinality = ReferenceCardinality.MANDATORY)
-    protected FlowObjectiveService flowObjectiveService;
-
     private FtpPacketProcessor ftpPacketProcessor = new FtpPacketProcessor();
-    private PacketPriority packetPriority = PacketPriority.HIGH;
+    private PacketPriority packetPriority = PacketPriority.REACTIVE;
 
     private ApplicationId appId;
     private TrafficSelector selector;
@@ -100,12 +91,11 @@ public class AppComponent extends AbstractWebApplication {
 
     @Activate
     protected void activate() {
+        log.info("Activating PSIK app");
         appId = coreService.registerApplication("pl.edu.pw.elka.stud.psik");
         packetService.addProcessor(ftpPacketProcessor, PacketProcessor.director(3)); // TODO check priority
         requestIntercepts();
         loadInitialConfig();
-
-        installRule(null);
 
         log.info("Started: " + appId.name());
     }
@@ -121,7 +111,7 @@ public class AppComponent extends AbstractWebApplication {
     }
 
     private void loadInitialConfig() {
-        // TODO load from REST
+        // TODO load from REST and check for correctness
         sharedAddress = Ip4Address.valueOf("10.0.1.10");
         Ip4Address serverAddress1 = Ip4Address.valueOf("10.0.1.1");
         Ip4Address serverAddress2 = Ip4Address.valueOf("10.0.1.2");
@@ -131,9 +121,10 @@ public class AppComponent extends AbstractWebApplication {
         hostsAssignedToSharedAddress.add(serverAddress3);
     }
 
-    private Ip4Address getNextHost() {
+    private Optional<Ip4Address> getNextServerIp() {
         int index = random.nextInt(hostsAssignedToSharedAddress.size());
-        return Ip4Address.valueOf("10.0.1.1");
+        return Optional.ofNullable(Ip4Address.valueOf("10.0.1.1"));
+        // TODO get from list
         // return hostsAssignedToSharedAddress.get(index);
     }
 
@@ -141,101 +132,133 @@ public class AppComponent extends AbstractWebApplication {
 
         @Override
         public void process(PacketContext context) {
-//            if (context.isHandled()) {
-//                log.info("PSIK: Context is handled");
-//                return;
-//            }
-
-
-
             InboundPacket inPacket = context.inPacket();
             Ethernet ethPacket = inPacket.parsed();
+            ConnectPoint srcConnectPoint = inPacket.receivedFrom();
 
             if(ethPacket == null) {
-                // log.warn("PSIK: Not an ethernet packet");
                 return;
             }
 
-            if (ethPacket.getEtherType() == Ethernet.TYPE_LLDP) {
-                // log.info("PSIK: LLDP packt");
-                return;
-            }
+            log.info("processing any packet");
 
-            log.info("PSIK: Packet received from: " + inPacket.receivedFrom().deviceId());
+            switch (EthType.EtherType.lookup(ethPacket.getEtherType())) {
+                case ARP:
+                    log.info("Processing ARP packet");
+                    ARP arpPacket = (ARP) ethPacket.getPayload();
+                    Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
 
-            if (ethPacket.getEtherType() == Ethernet.TYPE_ARP) {
-                ARP arpPacket = (ARP) ethPacket.getPayload();
-                log.info("PSIK: ARP packet: " + arpPacket);
+                    if(arpPacket.getOpCode() == ARP.OP_REQUEST &&
+                        targetAddress.equals(sharedAddress)) {
+                        log.info("Processing my packet");
+                        Optional<Ip4Address> nextServerIpOptional = getNextServerIp(); // TODO throw exception
+                        if(nextServerIpOptional.isPresent()) {
+                            Ip4Address nextServerIp = nextServerIpOptional.get();
+                            Set<Host> hosts = hostService.getHostsByIp(nextServerIp);
+                            if(hosts.size() == 0) {
+                               log.info("hosts size is 0");
+                                return; // TODO throw exception
+                            } else if(hosts.size() > 1) {
+                                log.info("hosts size is > 1");
+                                return; // TODO throw exception
+                            } else {
+                                MacAddress nextServerMac = hosts.iterator().next().mac();
 
-                Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
-                Ip4Address sourceAddress = Ip4Address.valueOf(arpPacket.getSenderProtocolAddress());
-                MacAddress srcMacAddress = MacAddress.valueOf(arpPacket.getSenderHardwareAddress());
-                log.info("PSIK: ARP target protocol address " + targetAddress);
+                                Ethernet arpReply = ARP.buildArpReply(targetAddress, nextServerMac, ethPacket);
 
-                if (targetAddress.equals(sharedAddress)) {
-                    Ip4Address newTargetAddress = activeSessionsHostToServer.getOrDefault(sourceAddress, getNextHost());
-                    activeSessionsHostToServer.put(sourceAddress, newTargetAddress);
-                    // arpPacket.setTargetProtocolAddress(newTargetAddress.toInt());
-                    // ethPacket.setPayload(arpPacket);
-                    // context.send();
-
-                    if (context.inPacket().receivedFrom().deviceId().equals(DeviceId.deviceId("of:0000000000000001"))) {
-                        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
-                        int port = 1;
-                        String connectionP = deviceId + "/" + port;
-                        proxyArpStoreDelegate.emitResponse(ConnectPoint.deviceConnectPoint(connectionP),
-                                ByteBuffer.wrap(ARP.buildArpReply(sourceAddress, srcMacAddress, ethPacket).serialize()));
-                        log.info("PSIK: Proxy delegate");
+                                TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                                        .setOutput(srcConnectPoint.port())
+                                        .build();
+                                log.info("Emiting to device and port " + srcConnectPoint.deviceId() + " " +
+                                        srcConnectPoint.port());
+                                packetService.emit(new DefaultOutboundPacket(
+                                        srcConnectPoint.deviceId(),
+                                        treatment,
+                                        ByteBuffer.wrap(arpReply.serialize())));
+                            }
+                        } else {
+                            log.info("Next server is optional");
+                            return;
+                        }
                     }
-
-                    log.info("PSIK: Sent changed ARP packet " + ethPacket);
-                }
-                return;
+                    break;
             }
 
-            if (ethPacket.getEtherType() != Ethernet.TYPE_IPV4) {
-                return;
-            }
-
-            log.info("Got IP v4 packet");
-
-            IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
-            if (!Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(sharedAddress)) {
-                return;
-            }
-
-
-            // log.info("PSIK: Received Ethernet packet");
-
-            if(!isFtpPacket(ethPacket)) {
-                return;
-            }
-
-            // IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
-            Ip4Address destinationAddress = Ip4Address.valueOf(ipv4Packet.getDestinationAddress());
-
-            if(destinationAddress.equals(sharedAddress)) {
-                log.info("PSIK: Received packet for shared address");
-
-                // TODO handle packet and install flows
-                Ip4Address sourceAddress = Ip4Address.valueOf(ipv4Packet.getSourceAddress());
-                Ip4Address newServerAddress = activeSessionsHostToServer.get(sourceAddress);
-
-                if (newServerAddress == null) {
-                    newServerAddress = getNextHost();
-                    activeSessionsHostToServer.put(sourceAddress, newServerAddress);
-                }
-
-                log.info("PSIK: Next server address for host: " + sourceAddress + " is: " + newServerAddress);
-                TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                        .setIpDst(newServerAddress)
-                        .build();
-                OutboundPacket outPacket = new DefaultOutboundPacket(inPacket.receivedFrom().deviceId(),
-                       treatment, ByteBuffer.wrap(ethPacket.serialize()));
-                packetService.emit(outPacket);
-                log.info("PSIK: emited packet: " + outPacket);
-            }
-
+////            log.info("PSIK: Packet received from: " + inPacket.receivedFrom().deviceId());
+////
+////            if (ethPacket.getEtherType() == Ethernet.TYPE_ARP) {
+////                ARP arpPacket = (ARP) ethPacket.getPayload();
+////                log.info("PSIK: ARP packet: " + arpPacket);
+////
+////                Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
+////                Ip4Address sourceAddress = Ip4Address.valueOf(arpPacket.getSenderProtocolAddress());
+////                MacAddress srcMacAddress = MacAddress.valueOf(arpPacket.getSenderHardwareAddress());
+////                log.info("PSIK: ARP target protocol address " + targetAddress);
+////
+////                if (targetAddress.equals(sharedAddress)) {
+////                    Ip4Address newTargetAddress = activeSessionsHostToServer.getOrDefault(sourceAddress, getNextServerIp());
+////                    activeSessionsHostToServer.put(sourceAddress, newTargetAddress);
+////                    // arpPacket.setTargetProtocolAddress(newTargetAddress.toInt());
+////                    // ethPacket.setPayload(arpPacket);
+////                    // context.send();
+////
+////                    if (context.inPacket().receivedFrom().deviceId().equals(DeviceId.deviceId("of:0000000000000001"))) {
+////                        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
+////                        int port = 1;
+////                        String connectionP = deviceId + "/" + port;
+////                        proxyArpStoreDelegate.emitResponse(ConnectPoint.deviceConnectPoint(connectionP),
+////                                ByteBuffer.wrap(ARP.buildArpReply(sourceAddress, srcMacAddress, ethPacket).serialize()));
+////                        log.info("PSIK: Proxy delegate");
+////                    }
+////
+////                    log.info("PSIK: Sent changed ARP packet " + ethPacket);
+////                }
+////                return;
+////            }
+//
+//            if (ethPacket.getEtherType() != Ethernet.TYPE_IPV4) {
+//                return;
+//            }
+//
+//            log.info("Got IP v4 packet");
+//
+//            IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
+//            if (!Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(sharedAddress)) {
+//                return;
+//            }
+//
+//
+//            // log.info("PSIK: Received Ethernet packet");
+//
+//            if(!isFtpPacket(ethPacket)) {
+//                return;
+//            }
+//
+//            // IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
+//            Ip4Address destinationAddress = Ip4Address.valueOf(ipv4Packet.getDestinationAddress());
+//
+//            if(destinationAddress.equals(sharedAddress)) {
+//                log.info("PSIK: Received packet for shared address");
+//
+//                // TODO handle packet and install flows
+//                Ip4Address sourceAddress = Ip4Address.valueOf(ipv4Packet.getSourceAddress());
+//                Ip4Address newServerAddress = activeSessionsHostToServer.get(sourceAddress);
+//
+//                if (newServerAddress == null) {
+//                    newServerAddress = getNextServerIp();
+//                    activeSessionsHostToServer.put(sourceAddress, newServerAddress);
+//                }
+//
+//                log.info("PSIK: Next server address for host: " + sourceAddress + " is: " + newServerAddress);
+//                TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+//                        .setIpDst(newServerAddress)
+//                        .build();
+//                OutboundPacket outPacket = new DefaultOutboundPacket(inPacket.receivedFrom().deviceId(),
+//                       treatment, ByteBuffer.wrap(ethPacket.serialize()));
+//                packetService.emit(outPacket);
+//                log.info("PSIK: emited packet: " + outPacket);
+//            }
+//
         }
     }
 
@@ -247,7 +270,7 @@ public class AppComponent extends AbstractWebApplication {
                 .build();
 
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setIpDst(getNextHost())
+//                .setIpDst(getNextServerIp())
                 .setOutput(PortNumber.portNumber(3))
                 .build();
 
@@ -260,13 +283,10 @@ public class AppComponent extends AbstractWebApplication {
                 //.makeTemporary(flowTimeout)
                 .add();
 
-        flowObjectiveService.forward(DeviceId.deviceId("of:0000000000000002"),
-                forwardingObjective);
+//        flowObjectiveService.forward(DeviceId.deviceId("of:0000000000000002"),
+//                forwardingObjective);
 
         HostStore hostStore;
-        HostService hostService;
-        HostProviderService hostProviderService;
-        hostProviderService.
         log.info("FLow installed");
     }
 
@@ -304,10 +324,10 @@ public class AppComponent extends AbstractWebApplication {
         packetService.cancelPackets(selector, packetPriority, appId);
     }
 
-    @Override
-    public Set<Class<?>> getClasses() {
-        return getClasses(FtpWebResource.class);
-    }
+//    @Override
+//    public Set<Class<?>> getClasses() {
+//        return getClasses(FtpWebResource.class);
+//    }
 
     @Path("/psik")
     private class FtpWebResource extends AbstractWebResource {
