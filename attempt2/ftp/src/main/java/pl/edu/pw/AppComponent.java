@@ -15,6 +15,9 @@
  */
 package pl.edu.pw;
 
+import lombok.AllArgsConstructor;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import org.onlab.packet.*;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
@@ -23,11 +26,10 @@ import org.onosproject.net.flow.DefaultTrafficSelector;
 import org.onosproject.net.flow.DefaultTrafficTreatment;
 import org.onosproject.net.flow.TrafficSelector;
 import org.onosproject.net.flow.TrafficTreatment;
-import org.onosproject.net.flow.criteria.Criterion;
 import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
-import org.onosproject.net.host.*;
+import org.onosproject.net.host.HostService;
 import org.onosproject.net.packet.*;
 import org.osgi.service.component.annotations.*;
 import org.slf4j.Logger;
@@ -37,7 +39,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 /**
- * Skeletal ONOS application component.
+ * Application for FTP load balancig.
  */
 @Component(immediate = true)
 public class AppComponent {
@@ -56,154 +58,179 @@ public class AppComponent {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowObjectiveService flowObjectiveService;
 
-    private FtpPacketProcessor ftpPacketProcessor = new FtpPacketProcessor();
-    private PacketPriority packetPriority = PacketPriority.MEDIUM;
+    private static final String APPLICATION_NAME = "pl.edu.pw";
+    private static final PacketPriority PACKET_INTERCEPT_PRIORITY = PacketPriority.MEDIUM;
 
-    private ApplicationId appId;
-    private TrafficSelector selector;
-    private TrafficSelector selector2;
-
-    @Reference(cardinality = ReferenceCardinality.MANDATORY)
-    private HostStore hostStore;
-
+    /**
+     * Shared IP address
+     */
     private Ip4Address sharedAddress;
-    private List<Ip4Address> hostsAssignedToSharedAddress = new ArrayList<>();
-    private Map<Ip4Address, Ip4Address> activeSessionsHostToServer = new HashMap<>();
-    private Map<Ip4Address, List<Ip4Address>> hostsWithActiveFtpSessionsAssignedToOldSharedAddresses;
+    /**
+     * FTP servers assigned to shared IP address
+     */
+    private List<Ip4Address> serversAssignedToSharedAddress = new ArrayList<>();
+    /**
+     * FTP session to changed IP address mapping
+     */
+    private Map<FtpSessionKey, Ip4Address> activeFtpSessions = new HashMap<>();
+
+    private FtpPacketProcessor ftpPacketProcessor = new FtpPacketProcessor();
     private Random random = new Random();
+    private ApplicationId appId;
+    private TrafficSelector arpSelector;
+    private TrafficSelector ipv4Selector;
+
+    @AllArgsConstructor
+    @Getter
+    @EqualsAndHashCode
+    private class FtpSessionKey {
+        // private int srcPort;
+        private Ip4Address srcIp;
+        private Ip4Address dstIp;
+    }
+
+    private void setSharedAddress(Ip4Address newSharedAddress) {
+        sharedAddress = newSharedAddress;
+    }
+
+    // TODO delete
+    private static final Ip4Address TEST_SHARED_ADDRESS = Ip4Address.valueOf("10.0.1.10");
+    private static final Ip4Address TEST_SERVER_1 = Ip4Address.valueOf("10.0.1.1");
+    private static final Ip4Address TEST_SERVER_2 = Ip4Address.valueOf("10.0.1.2");
+    private static final Ip4Address TEST_SERVER_3 = Ip4Address.valueOf("10.0.1.3");
+
+    // TODO load from REST and check for correctness
+    private void setupTestConfig() {
+        setSharedAddress(TEST_SHARED_ADDRESS);
+        serversAssignedToSharedAddress.add(TEST_SERVER_1);
+        // serversAssignedToSharedAddress.add(TEST_SERVER_2);
+        // serversAssignedToSharedAddress.add(TEST_SERVER_3);
+    }
+
+    // TODO delete
+    private void clearTestConfig() {
+        setSharedAddress(null);
+        serversAssignedToSharedAddress.clear();
+    }
 
     @Activate
     protected void activate() {
-        appId = coreService.registerApplication("pl.edu.pw");
-        packetService.addProcessor(ftpPacketProcessor, PacketProcessor.director(1)); // TODO check priority
+        appId = coreService.registerApplication(APPLICATION_NAME);
+        // Priority must be higher (lower in number) than the FWD app (which is "director(2)")
+        packetService.addProcessor(ftpPacketProcessor, PacketProcessor.director(1));
         requestIntercepts();
-        loadInitialConfig();
-        log.info("Packet priotiry REACTIVE/MEDIUM" + PacketPriority.REACTIVE + "/" + PacketPriority.MEDIUM);
+        setupTestConfig(); // TODO delete
         log.info("Started: " + appId.name());
     }
 
     @Deactivate
     protected void deactivate() {
-       packetService.removeProcessor(ftpPacketProcessor);
-       ftpPacketProcessor = null;
-       withdrawIntercepts();
+        packetService.removeProcessor(ftpPacketProcessor);
+        ftpPacketProcessor = null;
+        withdrawIntercepts();
         // TODO drop all flows installed by this app
+        clearTestConfig();
         log.info("Stopped: " + appId.name());
     }
 
-
-    // TODO check if this can be deleted
+    // This is not necessary when ProxyARP and FWD apps are activated
     private void requestIntercepts() {
-        selector = DefaultTrafficSelector.builder()
+        arpSelector = DefaultTrafficSelector.builder()
                 .matchEthType(Ethernet.TYPE_ARP)
                 .build();
 
-        selector2 = DefaultTrafficSelector.builder()
+        ipv4Selector = DefaultTrafficSelector.builder()
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .build();
-        packetService.requestPackets(selector, packetPriority, appId); // TODO check with HIGH or MEDIUM
-        packetService.requestPackets(selector2, packetPriority, appId);
+
+        packetService.requestPackets(arpSelector, PACKET_INTERCEPT_PRIORITY, appId);
+        packetService.requestPackets(ipv4Selector, PACKET_INTERCEPT_PRIORITY, appId);
     }
 
     private void withdrawIntercepts() {
-        packetService.cancelPackets(selector, packetPriority, appId);
-        packetService.cancelPackets(selector2, packetPriority, appId);
+        packetService.cancelPackets(arpSelector, PACKET_INTERCEPT_PRIORITY, appId);
+        packetService.cancelPackets(ipv4Selector, PACKET_INTERCEPT_PRIORITY, appId);
     }
 
-    private void loadInitialConfig() {
-        // TODO load from REST and check for correctness
-        sharedAddress = Ip4Address.valueOf("10.0.1.10");
-        Ip4Address serverAddress1 = Ip4Address.valueOf("10.0.1.1");
-        Ip4Address serverAddress2 = Ip4Address.valueOf("10.0.1.2");
-        Ip4Address serverAddress3 = Ip4Address.valueOf("10.0.1.3");
-        hostsAssignedToSharedAddress.add(serverAddress1);
-        hostsAssignedToSharedAddress.add(serverAddress2);
-        hostsAssignedToSharedAddress.add(serverAddress3);
-
-        Host host1 = hostService.getHostsByIp(serverAddress1).iterator().next();
-//        Set<IpAddress> ipSEt = new HashSet<>();
-//        ipSEt.add(serverAddress1);
-
-//        HostDescription hostDescription = new DefaultHostDescription(host1.mac(),
-//                host1.vlan(),
-//                host1.location(),
-//                Collections.unmodifiableSet(ipSEt),
-//                DefaultAnnotations.EMPTY);
-//
-//        hostStore.createOrUpdateHost(host1.providerId(),
-//                HostId.hostId(host1.mac()),
-//                hostDescription,
-//                false);
-
-        log.info("Host ips: " + hostService.getHost(HostId.hostId(host1.mac())).ipAddresses());
-        hostService.getHosts().forEach(host -> log.info("Host: " + host));
-
-    }
-
-    private Optional<Ip4Address> getNextServerIp() {
-        int index = random.nextInt(hostsAssignedToSharedAddress.size());
-        return Optional.ofNullable(Ip4Address.valueOf("10.0.1.1"));
-        // TODO get from list
-        // return hostsAssignedToSharedAddress.get(index);
+    private Optional<Ip4Address> selectNextServerIpAddress(Ip4Address srcAddress, Ip4Address sharedAddress) {
+        FtpSessionKey key = new FtpSessionKey(srcAddress, sharedAddress);
+        if (activeFtpSessions.containsKey(key)) {
+            return Optional.of(activeFtpSessions.get(key));
+        } else {
+            int index = random.nextInt(serversAssignedToSharedAddress.size());
+            Ip4Address dstAddress = serversAssignedToSharedAddress.get(index);
+            if (dstAddress != null) {
+                activeFtpSessions.put(key, dstAddress);
+            }
+            return Optional.ofNullable(dstAddress);
+        }
     }
 
     private class FtpPacketProcessor implements PacketProcessor {
 
         @Override
         public void process(PacketContext context) {
+            if (context.isHandled()) {
+                return;
+            }
+
             InboundPacket inPacket = context.inPacket();
             Ethernet ethPacket = inPacket.parsed();
             ConnectPoint srcConnectPoint = inPacket.receivedFrom();
 
-            if(ethPacket == null) {
+            if (ethPacket == null) {
                 return;
             }
 
             switch (EthType.EtherType.lookup(ethPacket.getEtherType())) {
                 case ARP:
                     ARP arpPacket = (ARP) ethPacket.getPayload();
-                    Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
 
-                    if(arpPacket.getOpCode() == ARP.OP_REQUEST &&
-                            targetAddress.equals(sharedAddress)) {
-                        log.info("Got ARP request for shared address: " + arpPacket);
-                        Optional<Ip4Address> nextServerIpOptional = getNextServerIp(); // TODO throw exception
-                        if(nextServerIpOptional.isPresent()) {
-                            Ip4Address nextServerIp = nextServerIpOptional.get();
-                            Set<Host> hosts = hostService.getHostsByIp(nextServerIp);
-                            if(hosts.size() == 0) {
-                                log.info("hosts size is 0");
-                                return; // TODO throw exception
-                            } else if(hosts.size() > 1) {
-                                log.info("hosts size is > 1");
-                                return; // TODO throw exception
-                            } else {
-                                Host srcHost = hostService.getHost(HostId.hostId(
-                                        MacAddress.valueOf(arpPacket.getSenderHardwareAddress())));
-                                if(srcConnectPoint.deviceId().equals(srcHost.location().deviceId())
-                                    && srcConnectPoint.port().equals(srcHost.location().port())
-                                ) {
-                                    MacAddress nextServerMac = hosts.iterator().next().mac();
-
-                                    Ethernet arpReply = ARP.buildArpReply(targetAddress, nextServerMac, ethPacket);
-                                    // TODO check topo if it is switch connected to src
-                                    TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                                            .setOutput(srcConnectPoint.port())
-                                            .build();
-                                    log.info("Emiting to device and port " + srcConnectPoint.deviceId() + " " +
-                                            srcConnectPoint.port());
-                                    packetService.emit(new DefaultOutboundPacket(
-                                            srcConnectPoint.deviceId(),
-                                            treatment,
-                                            ByteBuffer.wrap(arpReply.serialize())));
-                                }
-
-                            }
-                        } else {
-                            log.info("Next server is optional");
-                            return;
-                        }
+                    if (arpPacket.getOpCode() != ARP.OP_REQUEST) {
+                        return;
                     }
+
+                    Ip4Address sourceAddress = Ip4Address.valueOf(arpPacket.getSenderProtocolAddress());
+                    Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
+                    if (!targetAddress.equals(sharedAddress)) {
+                        return;
+                    }
+
+                    log.info("Got ARP request for the shared address: {}", arpPacket);
+
+                    // Check if it is the first device on the ARP packet path
+                    HostId srcHostId = HostId.hostId(MacAddress.valueOf(arpPacket.getSenderHardwareAddress()));
+                    Host srcHost = hostService.getHost(srcHostId);
+                    if (!srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) ||
+                            !srcConnectPoint.port().equals(srcHost.location().port())
+                    ) {
+                        return;
+                    }
+
+                    selectNextServerIpAddress(sourceAddress, targetAddress).ifPresent((selectedServerIp) -> {
+                        Set<Host> hosts = hostService.getHostsByIp(selectedServerIp);
+                        if (hosts.size() == 0) {
+                            log.error("No host found for the IP address: {}", selectedServerIp);
+                        } else if (hosts.size() > 1) {
+                            log.error("Found {} hosts with the same IP address", hosts.size());
+                        } else {
+                            MacAddress selectedServerMac = hosts.iterator().next().mac();
+
+                            Ethernet arpReply = ARP.buildArpReply(targetAddress, selectedServerMac, ethPacket);
+                            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                                    .setOutput(srcConnectPoint.port())
+                                    .build();
+
+                            packetService.emit(new DefaultOutboundPacket(
+                                    srcConnectPoint.deviceId(),
+                                    treatment,
+                                    ByteBuffer.wrap(arpReply.serialize())));
+
+                            log.info("Emitted packet to device:port {}:{}",
+                                    srcConnectPoint.deviceId(),
+                                    srcConnectPoint.port());
+                        }
+                    });
                     break;
                 case IPV4:
                     IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
@@ -216,7 +243,7 @@ public class AppComponent {
 //                        return;
 //                    }
 
-                    if(ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
+                    if (ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
                         log.info("Not a TCP protocol");
                         return;
                     }
@@ -239,15 +266,15 @@ public class AppComponent {
 //                        log.info("Got TCP ACK: " + tcpPacket);
 //                    }
 
-                    if(standardFtpPorts.contains(destinationPort) ||
-                    standardFtpPorts.contains(srcPort)) {
+                    if (standardFtpPorts.contains(destinationPort) ||
+                            standardFtpPorts.contains(srcPort)) {
                         log.info("Received FTP packet: " + tcpPacket);
-                        if(context.isHandled()) {
+                        if (context.isHandled()) {
                             log.info("Context is handled");
                         }
 
-                        if(srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000001"))) {
-                            if(srcConnectPoint.port().equals(PortNumber.portNumber(4))) {
+                        if (srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000001"))) {
+                            if (srcConnectPoint.port().equals(PortNumber.portNumber(4))) {
                                 log.info("DEV 1, PORT 4");
                                 // emitPacket(srcConnectPoint.deviceId(), ethPacket, 1);
 
@@ -262,8 +289,8 @@ public class AppComponent {
                                 emitPacket(srcConnectPoint.deviceId(), ethPacket, 4);
                                 // context.block();
                             }
-                        } else if(srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000002"))) {
-                            if(srcConnectPoint.port().equals(PortNumber.portNumber(1))) {
+                        } else if (srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000002"))) {
+                            if (srcConnectPoint.port().equals(PortNumber.portNumber(1))) {
                                 log.info("DEV 2, PORT 1");
                                 ipv4Packet.setDestinationAddress("10.0.1.1");
                                 ipv4Packet.resetChecksum();
@@ -338,13 +365,13 @@ public class AppComponent {
 
             flowObjectiveService.forward(deviceId,
                     DefaultForwardingObjective.builder()
-                    .fromApp(appId)
-                    .withSelector(selector)
-                    .withTreatment(treatment)
-                    .withFlag(ForwardingObjective.Flag.VERSATILE)
-                    .withPriority(100)
+                            .fromApp(appId)
+                            .withSelector(selector)
+                            .withTreatment(treatment)
+                            .withFlag(ForwardingObjective.Flag.VERSATILE)
+                            .withPriority(100)
                             .makeTemporary(120)
-                    .add());
+                            .add());
 
             ipPacket.setDestinationAddress(ipDst.toInt());
             ethPacket.setPayload(ipPacket);
