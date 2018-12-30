@@ -31,6 +31,7 @@ import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
 import org.onosproject.net.host.HostService;
 import org.onosproject.net.packet.*;
+import org.onosproject.net.topology.TopologyService;
 import org.osgi.service.component.annotations.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,10 +57,14 @@ public class AppComponent {
     protected HostService hostService;
 
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected TopologyService topologyService;
+
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowObjectiveService flowObjectiveService;
 
     private static final String APPLICATION_NAME = "pl.edu.pw";
-    private static final PacketPriority PACKET_INTERCEPT_PRIORITY = PacketPriority.MEDIUM;
+    private static final PacketPriority PACKET_INTERCEPT_PRIORITY = PacketPriority.REACTIVE;
+    private static final List<Integer> STANDARD_FTP_PORTS = Arrays.asList(20, 21);
 
     /**
      * Shared IP address
@@ -94,7 +99,7 @@ public class AppComponent {
     }
 
     // TODO delete
-    private static final Ip4Address TEST_SHARED_ADDRESS = Ip4Address.valueOf("10.0.1.10");
+    private static final Ip4Address TEST_SHARED_ADDRESS = Ip4Address.valueOf("10.0.1.20");
     private static final Ip4Address TEST_SERVER_1 = Ip4Address.valueOf("10.0.1.1");
     private static final Ip4Address TEST_SERVER_2 = Ip4Address.valueOf("10.0.1.2");
     private static final Ip4Address TEST_SERVER_3 = Ip4Address.valueOf("10.0.1.3");
@@ -166,13 +171,68 @@ public class AppComponent {
         }
     }
 
+    private Optional<Path> pickForwardPathIfPossible(Set<Path> paths, PortNumber notToPort) {
+        return paths.stream()
+                .filter(path -> !path.src().port().equals(notToPort))
+                .findFirst();
+    }
+
+    // Install a rule forwarding the packet to the specified port.
+    private void installRule(PacketContext context, PortNumber portNumber) {
+        log.info("Installing rule");
+        Ethernet inPkt = context.inPacket().parsed();
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+                .matchInPort(context.inPacket().receivedFrom().port())
+                .matchEthSrc(inPkt.getSourceMAC())
+                .matchEthDst(inPkt.getDestinationMAC());
+
+
+        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
+        byte ipv4Protocol = ipv4Packet.getProtocol();
+        Ip4Prefix matchIp4SrcPrefix =
+                Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(),
+                        Ip4Prefix.MAX_MASK_LENGTH);
+        Ip4Prefix matchIp4DstPrefix =
+                Ip4Prefix.valueOf(ipv4Packet.getDestinationAddress(),
+                        Ip4Prefix.MAX_MASK_LENGTH);
+        selectorBuilder.matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPSrc(matchIp4SrcPrefix)
+                .matchIPDst(matchIp4DstPrefix);
+
+        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
+        selectorBuilder.matchIPProtocol(ipv4Protocol)
+                .matchTcpSrc(TpPort.tpPort(tcpPacket.getSourcePort()))
+                .matchTcpDst(TpPort.tpPort(tcpPacket.getDestinationPort()));
+
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setOutput(portNumber)
+                .build();
+
+        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
+                .withSelector(selectorBuilder.build())
+                .withTreatment(treatment)
+                .withPriority(15)
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makeTemporary(10)
+                .add();
+
+        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(),
+                forwardingObjective);
+
+        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), portNumber);
+        context.treatmentBuilder().setOutput(portNumber);
+        context.send();
+        context.block();
+    }
+
     private class FtpPacketProcessor implements PacketProcessor {
 
         @Override
         public void process(PacketContext context) {
-            if (context.isHandled()) {
-                return;
-            }
+//            if (context.isHandled()) {
+//                return;
+//            }
 
             InboundPacket inPacket = context.inPacket();
             Ethernet ethPacket = inPacket.parsed();
@@ -196,7 +256,11 @@ public class AppComponent {
                         return;
                     }
 
-                    log.info("Got ARP request for the shared address: {}", arpPacket);
+                    log.info("--------------------------------------------------------------");
+                    log.info("Got ARP request: srcIp: {}, srcMac: {}, targetIp: {}",
+                            Ip4Address.valueOf(arpPacket.getSenderProtocolAddress()),
+                            MacAddress.valueOf(arpPacket.getSenderHardwareAddress()),
+                            Ip4Address.valueOf(arpPacket.getTargetProtocolAddress()));
 
                     // Check if it is the first device on the ARP packet path
                     HostId srcHostId = HostId.hostId(MacAddress.valueOf(arpPacket.getSenderHardwareAddress()));
@@ -221,228 +285,87 @@ public class AppComponent {
                                     .setOutput(srcConnectPoint.port())
                                     .build();
 
+                            log.info("Emitting packet with targetMac: {} to device:port {}:{}",
+                                    MacAddress.valueOf(((ARP) arpReply.getPayload()).getTargetHardwareAddress()),
+                                    srcConnectPoint.deviceId(),
+                                    srcConnectPoint.port());
+
                             packetService.emit(new DefaultOutboundPacket(
                                     srcConnectPoint.deviceId(),
                                     treatment,
                                     ByteBuffer.wrap(arpReply.serialize())));
-
-                            log.info("Emitted packet to device:port {}:{}",
-                                    srcConnectPoint.deviceId(),
-                                    srcConnectPoint.port());
                         }
                     });
                     break;
                 case IPV4:
                     IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
-                    log.info("Received IPv4 packet from device/port: " + srcConnectPoint.deviceId() + "/" +
-                            srcConnectPoint.port());
-                    log.info("Received packet for IP: " + ethPacket);
-
-//                    if (!Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(sharedAddress) &&
-//                            !Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(Ip4Address.valueOf("10.0.1.1"))) {
-//                        return;
-//                    }
-
                     if (ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
-                        log.info("Not a TCP protocol");
                         return;
                     }
 
-                    List<Integer> standardFtpPorts = Arrays.asList(20, 21);
+                    log.info("--------------------------------------------------------------");
                     TCP tcpPacket = (TCP) ipv4Packet.getPayload();
+                    if (tcpPacket.getPayload().serialize().length == 0) {
+                        log.info("ACK: seq: {}, ack: {}, srcPort: {}, dstPort: {}",
+                                tcpPacket.getSequence(), tcpPacket.getAcknowledge(),
+                                tcpPacket.getSourcePort(), tcpPacket.getDestinationPort());
+                        // return;
+                    }
+
                     int destinationPort = tcpPacket.getDestinationPort();
-                    int srcPort = tcpPacket.getSourcePort();
-
-                    log.info("IP packet: " + ipv4Packet);
-
-//                    log.info("TCP src/dst port: " + destinationPort + "/" + srcPort);
-//
-//                    if(!standardFtpPorts.contains(destinationPort) &&
-//                    !standardFtpPorts.contains(srcPort)) {
-//                        log.info("NO FTP PORTS!");
-//                    }
-
-//                    if(tcpPacket.getFlags()) {
-//                        log.info("Got TCP ACK: " + tcpPacket);
-//                    }
-
-                    if (standardFtpPorts.contains(destinationPort) ||
-                            standardFtpPorts.contains(srcPort)) {
-                        log.info("Received FTP packet: " + tcpPacket);
-                        if (context.isHandled()) {
-                            log.info("Context is handled");
-                        }
-
-                        if (srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000001"))) {
-                            if (srcConnectPoint.port().equals(PortNumber.portNumber(4))) {
-                                log.info("DEV 1, PORT 4");
-                                // emitPacket(srcConnectPoint.deviceId(), ethPacket, 1);
-
-                            } else if (srcConnectPoint.port().equals(PortNumber.portNumber(1))) {
-                                log.info("DEV 1, PORT 1");
-                                ipv4Packet.setSourceAddress("10.0.1.10");
-                                ipv4Packet.setDestinationAddress("10.0.2.1");
-                                ipv4Packet.resetChecksum();
-                                ethPacket.setPayload(ipv4Packet);
-                                ethPacket.setDestinationMACAddress("00:00:00:00:02:01");
-                                ethPacket.resetChecksum();
-                                emitPacket(srcConnectPoint.deviceId(), ethPacket, 4);
-                                // context.block();
-                            }
-                        } else if (srcConnectPoint.deviceId().equals(DeviceId.deviceId("of:0000000000000002"))) {
-                            if (srcConnectPoint.port().equals(PortNumber.portNumber(1))) {
-                                log.info("DEV 2, PORT 1");
-                                ipv4Packet.setDestinationAddress("10.0.1.1");
-                                ipv4Packet.resetChecksum();
-                                ethPacket.setPayload(ipv4Packet);
-                                ethPacket.resetChecksum();
-                                emitPacket(srcConnectPoint.deviceId(), ethPacket, 3);
-                                // context.block();
-                            } else if (srcConnectPoint.port().equals(PortNumber.portNumber(3))) {
-                                log.info("DEV 2, PORT 3");
-                                // emitPacket(srcConnectPoint.deviceId(), ethPacket, 1);
-                            }
-
-                        }
-
-                        // context.block();
-
-//                        installRules(context,
-//                                srcConnectPoint.deviceId(),
-//                                ethPacket.getSourceMAC(),
-//                                ethPacket.getDestinationMAC(),
-//                                sharedAddress,
-//                                Ip4Address.valueOf("10.0.1.1"),
-//                                TpPort.tpPort(tcpPacket.getSourcePort()),
-//                                ethPacket,
-//                                ipv4Packet,
-//                                3);
-//                        installNextFlow(context,
-//                                DeviceId.deviceId("of:0000000000000001"),
-//                                ethPacket.getSourceMAC(),
-//                                ethPacket.getDestinationMAC(),
-//                                sharedAddress,
-//                                Ip4Address.valueOf("10.0.1.1"),
-//                                TpPort.tpPort(tcpPacket.getSourcePort()),
-//                                ethPacket,
-//                                ipv4Packet,
-//                                1);
+                    if (!STANDARD_FTP_PORTS.contains(destinationPort)) { // TODO or srcPort?
                         return;
                     }
-                    break;
+
+                    log.info("Received FTP packet from device:port {}:{}",
+                            srcConnectPoint.deviceId(),
+                            srcConnectPoint.port());
+
+                    log.info("ETH: srcMAC: {}, dstMAC: {}", ethPacket.getSourceMAC(), ethPacket.getDestinationMAC());
+
+                    log.info("IP: srcIP: {}, dstIP: {}, checksum: {}",
+                            Ip4Address.valueOf(ipv4Packet.getSourceAddress()),
+                            Ip4Address.valueOf(ipv4Packet.getDestinationAddress()),
+                            ipv4Packet.getChecksum());
+
+                    log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}",
+                            tcpPacket.getSourcePort(), tcpPacket.getDestinationPort(),
+                            tcpPacket.getChecksum(), tcpPacket.getSequence(), tcpPacket.getAcknowledge());
+
+                    // Check if packet is for or from the shared IP addresss
+                    if (!Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(sharedAddress)) { // TODO and srcAddress?
+                        return;
+                    }
+
+                    Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
+                    if (dstHost == null) {
+                        log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
+                        return;
+                    }
+
+                    // Are we on an edge switch that our destination is on?
+                    // If so, simply forward out to the destination and bail.
+                    if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
+                            !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
+                        log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
+                        installRule(context, dstHost.location().port());
+                        return;
+                    }
+
+                    // Otherwise, get a set of paths that lead from here to the destination edge switch.
+                    Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
+                            srcConnectPoint.deviceId(),
+                            dstHost.location().deviceId());
+
+                    if (paths.isEmpty()) {
+                        log.error("No paths available");
+                        context.block();
+                        return;
+                    }
+
+                    pickForwardPathIfPossible(paths, srcConnectPoint.port())
+                            .ifPresent(path -> installRule(context, path.src().port()));
             }
         }
-
-        private void emitPacket(DeviceId deviceId, Ethernet ethPacket, int outPort) {
-            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                    .setIpDst(Ip4Address.valueOf("10.0.1.1"))
-                    .setOutput(PortNumber.portNumber(outPort))
-                    .build();
-            OutboundPacket packet = new DefaultOutboundPacket(deviceId,
-                    treatment, ByteBuffer.wrap(ethPacket.serialize()));
-            packetService.emit(packet);
-            log.info("sending packet: {}", packet);
-        }
-
-        private void installRules(PacketContext context, DeviceId deviceId, MacAddress ethSrc, MacAddress ethDst,
-                                  Ip4Address sharedIp, Ip4Address ipDst, TpPort srcPort,
-                                  Ethernet ethPacket, IPv4 ipPacket, long outPort) {
-            TrafficSelector selector = DefaultTrafficSelector.builder()
-                    .matchEthSrc(ethSrc)
-                    .matchEthDst(ethDst)
-                    .matchEthType(EthType.EtherType.IPV4.ethType().toShort())
-                    .matchIPDst(sharedIp.toIpPrefix())
-                    .matchIPProtocol(IPv4.PROTOCOL_TCP)
-                    .matchTcpSrc(srcPort)
-                    .build();
-
-            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                    .setIpDst(ipDst)
-                    .setOutput(PortNumber.portNumber(3))
-                    .build();
-
-            log.info("Installing rule");
-
-            flowObjectiveService.forward(deviceId,
-                    DefaultForwardingObjective.builder()
-                            .fromApp(appId)
-                            .withSelector(selector)
-                            .withTreatment(treatment)
-                            .withFlag(ForwardingObjective.Flag.VERSATILE)
-                            .withPriority(100)
-                            .makeTemporary(120)
-                            .add());
-
-            ipPacket.setDestinationAddress(ipDst.toInt());
-            ethPacket.setPayload(ipPacket);
-            OutboundPacket packet = new DefaultOutboundPacket(deviceId,
-                    treatment, ByteBuffer.wrap(ethPacket.serialize()));
-            packetService.emit(packet);
-            log.info("sending packet: {}", packet);
-            log.info("Context sent");
-
-            // context.block();
-            log.info("Context blocked");
-        }
-
-        private void installNextFlow(PacketContext context, DeviceId deviceId, MacAddress ethSrc, MacAddress ethDst,
-                                     Ip4Address sharedIp, Ip4Address ipDst, TpPort srcPort,
-                                     Ethernet ethPacket, IPv4 ipPacket, long outPort) {
-            TrafficSelector selector = DefaultTrafficSelector.builder()
-                    .matchEthSrc(ethSrc)
-                    .matchEthDst(ethDst)
-                    .matchIPDst(ipDst.toIpPrefix())
-                    .matchEthType(EthType.EtherType.IPV4.ethType().toShort())
-                    .matchIPProtocol(IPv4.PROTOCOL_TCP)
-                    .matchTcpSrc(srcPort)
-                    .build();
-
-            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                    .setOutput(PortNumber.portNumber(1))
-                    .build();
-
-            log.info("Installing rule");
-
-            flowObjectiveService.forward(deviceId,
-                    DefaultForwardingObjective.builder()
-                            .fromApp(appId)
-                            .withSelector(selector)
-                            .withTreatment(treatment)
-                            .withFlag(ForwardingObjective.Flag.VERSATILE)
-                            .withPriority(100)
-                            .makeTemporary(120)
-                            .add());
-        }
-
-        private void installReverseFlow(PacketContext context, DeviceId deviceId, MacAddress ethSrc, MacAddress ethDst,
-                                        Ip4Address sharedIp, Ip4Address ipDst, TpPort srcPort,
-                                        Ethernet ethPacket, IPv4 ipPacket, long outPort) {
-            TrafficSelector selector = DefaultTrafficSelector.builder()
-                    .matchEthSrc(ethSrc)
-                    .matchEthDst(ethDst)
-                    .matchEthType(EthType.EtherType.IPV4.ethType().toShort())
-                    .matchIPDst(sharedIp.toIpPrefix())
-                    .matchIPProtocol(IPv4.PROTOCOL_TCP)
-                    .matchTcpSrc(srcPort)
-                    .build();
-
-            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                    .setIpDst(ipDst)
-                    .setOutput(PortNumber.portNumber(3))
-                    .build();
-
-            log.info("Installing rule");
-
-            flowObjectiveService.forward(deviceId,
-                    DefaultForwardingObjective.builder()
-                            .fromApp(appId)
-                            .withSelector(selector)
-                            .withTreatment(treatment)
-                            .withFlag(ForwardingObjective.Flag.VERSATILE)
-                            .withPriority(100)
-                            .makeTemporary(120)
-                            .add());
-        }
     }
-
 }
