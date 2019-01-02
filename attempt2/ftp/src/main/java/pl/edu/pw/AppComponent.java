@@ -36,7 +36,6 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * Application for FTP load balancig.
@@ -327,6 +326,58 @@ public class AppComponent {
 //        context.block();
     }
 
+    private void installSymmetricalRuleChangeSrcIpAndForward(PacketContext context, PortNumber outPort, Ip4Address newDstIp, Ip4Address newSrcIp) {
+        log.info("Installing rule with src IP modification");
+        Ethernet inPkt = context.inPacket().parsed();
+        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
+        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
+        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(newDstIp, Ip4Prefix.MAX_MASK_LENGTH);
+        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
+
+        TrafficSelector selector = DefaultTrafficSelector.builder()
+                .matchInPort(outPort)
+                .matchEthSrc(inPkt.getDestinationMAC())
+                .matchEthDst(inPkt.getSourceMAC())
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPSrc(srcIpPrefix)
+                .matchIPDst(dstIpPrefix)
+                .matchIPProtocol(ipv4Packet.getProtocol())
+                .matchTcpSrc(TpPort.tpPort(tcpPacket.getDestinationPort()))
+                .matchTcpDst(TpPort.tpPort(tcpPacket.getSourcePort()))
+                .build();
+
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setIpSrc(newSrcIp)
+                .setOutput(context.inPacket().receivedFrom().port())
+                .build();
+
+        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
+                .withSelector(selector)
+                .withTreatment(treatment)
+                .withPriority(FLOW_PRIORITY)
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
+                .add();
+
+        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
+
+//        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
+//        ipv4Packet.setSourceAddress(newSrcIp.toInt());
+//
+//        ipv4Packet.resetChecksum();
+//        inPkt.setPayload(ipv4Packet);
+//        inPkt.resetChecksum();
+//        packetService.emit(new DefaultOutboundPacket(
+//                context.inPacket().receivedFrom().deviceId(),
+//                treatment,
+//                ByteBuffer.wrap(inPkt.serialize())));
+////        context.treatmentBuilder().setIpDst(newSrcIp).setOutput(outPort);
+////        context.send();
+//        context.block();
+    }
+
+
     private void installRuleChangeSrcIpAndForward(PacketContext context, PortNumber outPort, Ip4Address newSrcIp) {
         log.info("Installing rule with src IP modification");
         Ethernet inPkt = context.inPacket().parsed();
@@ -542,17 +593,17 @@ public class AppComponent {
 
             // Are we on an edge switch that our destination is on?
             // If so, simply forward out to the destination and bail.
-            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
-                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
-                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
-                log.info("Setting new target IP for packet");
-                log.info("Current sessions: {}", activeFtpSessions);
-                Ip4Address newDstIp = activeFtpSessions.get(key);
-                log.info("Selected value: {} for key: {}", newDstIp, key);
-                installRuleAndForward(context, dstHost.location().port(), newDstIp);
-                installSymmetricalRuleChangeSrcIpAndForward(context, dstHost.location().port(), sharedAddress);
-                return;
-            }
+//            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
+//                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
+//                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
+//                log.info("Setting new target IP for packet");
+//                log.info("Current sessions: {}", activeFtpSessions);
+//                Ip4Address newDstIp = activeFtpSessions.get(key);
+//                log.info("Selected value: {} for key: {}", newDstIp, key);
+//                installRuleAndForward(context, dstHost.location().port(), newDstIp);
+//                installSymmetricalRuleChangeSrcIpAndForward(context, dstHost.location().port(), sharedAddress);
+//                return;
+//            }
 
             // Otherwise, get a set of paths that lead from here to the destination edge switch.
             Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
@@ -565,55 +616,60 @@ public class AppComponent {
                 return;
             }
 
+            Ip4Address newDstIp = activeFtpSessions.get(key);
             pickForwardPathIfPossible(paths, srcConnectPoint.port())
-                    .ifPresent(path -> installRuleAndForward(context, path.src().port())); // TODO
+                    .ifPresent(path -> {
+                        installRuleAndForward(context, path.src().port(), newDstIp);
+                        installSymmetricalRuleChangeSrcIpAndForward(context, path.src().port(), newDstIp, sharedAddress);
+                    }); // TODO
             return;
-        } else if (Ip4Address.valueOf(ipv4Packet.getSourceAddress()).equals(sharedAddress)) {
-            log.info("Packet with shared address as a source");
-            Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
-            if (dstHost == null) {
-                log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
-                return;
-            }
-
-            // Are we on an edge switch that our destination is on?
-            // If so, simply forward out to the destination and bail.
-            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
-                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
-                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
-                log.info("Simply forward.");
-                installRuleAndForward(context, dstHost.location().port());
-                return;
-            }
-
-            // Otherwise, get a set of paths that lead from here to the destination edge switch.
-            Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
-                    srcConnectPoint.deviceId(),
-                    dstHost.location().deviceId());
-
-            if (paths.isEmpty()) {
-                log.error("No paths available");
-                context.block();
-                return;
-            }
-
-            pickForwardPathIfPossible(paths, srcConnectPoint.port())
-                    .ifPresent(path -> installRuleAndForward(context, path.src().port()));
-            return;// TODO forward
         }
-        log.info("Should be handled by FWD");
-
-        Set<Ip4Address> sharedAddresses = activeFtpSessions.keySet()
-                .stream()
-                .filter(key -> key.srcPort.equals(PortNumber.portNumber(tcpPacket.getDestinationPort())) &&
-                        key.srcIp.equals(Ip4Address.valueOf(ipv4Packet.getDestinationAddress())) &&
-                        activeFtpSessions.get(key).equals(Ip4Address.valueOf(ipv4Packet.getSourceAddress())))
-                .map(key -> key.dstIp)
-                .collect(Collectors.toSet());
-
-
-        if (sharedAddresses.size() != 1) {
-            log.error("Shared addresses size is other than 1: {}", sharedAddresses);
+//        } else if (Ip4Address.valueOf(ipv4Packet.getSourceAddress()).equals(sharedAddress)) {
+//            log.info("Packet with shared address as a source");
+//            Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
+//            if (dstHost == null) {
+//                log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
+//                return;
+//            }
+//
+//            // Are we on an edge switch that our destination is on?
+//            // If so, simply forward out to the destination and bail.
+//            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
+//                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
+//                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
+//                log.info("Simply forward.");
+//                installRuleAndForward(context, dstHost.location().port());
+//                return;
+//            }
+//
+//            // Otherwise, get a set of paths that lead from here to the destination edge switch.
+//            Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
+//                    srcConnectPoint.deviceId(),
+//                    dstHost.location().deviceId());
+//
+//            if (paths.isEmpty()) {
+//                log.error("No paths available");
+//                context.block();
+//                return;
+//            }
+//
+//            pickForwardPathIfPossible(paths, srcConnectPoint.port())
+//                    .ifPresent(path -> installRuleAndForward(context, path.src().port()));
+//            return;// TODO forward
+//        }
+//        log.info("Should be handled by FWD");
+//
+//        Set<Ip4Address> sharedAddresses = activeFtpSessions.keySet()
+//                .stream()
+//                .filter(key -> key.srcPort.equals(PortNumber.portNumber(tcpPacket.getDestinationPort())) &&
+//                        key.srcIp.equals(Ip4Address.valueOf(ipv4Packet.getDestinationAddress())) &&
+//                        activeFtpSessions.get(key).equals(Ip4Address.valueOf(ipv4Packet.getSourceAddress())))
+//                .map(key -> key.dstIp)
+//                .collect(Collectors.toSet());
+//
+//
+//        if (sharedAddresses.size() != 1) {
+//            log.error("Shared addresses size is other than 1: {}", sharedAddresses);
 //        } else if (sharedAddresses.size() == 0) {
 //            if (tcpPacket.getSourcePort() == 20) {
 //                // TODO add FTP port to key and check if 21 session has its corresponding 20 session
@@ -624,42 +680,42 @@ public class AppComponent {
 ////                activeFtpSessions.keySet().stream()
 ////                        .filter(key -> key.)
 //            }
-        } else {
-            Ip4Address sessionSharedAddress = sharedAddresses.iterator().next();
-            // Check if it is the first device on the packet path
-            // If so add to active FTP sessions
-            HostId srcHostId = HostId.hostId(ethPacket.getSourceMAC());
-            Host srcHost = hostService.getHost(srcHostId);
-            if (srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) &&
-                    srcConnectPoint.port().equals(srcHost.location().port())
-            ) {
-                log.info("First device on the FTP ACK packet path");
-                Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
-                if (dstHost == null) {
-                    log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
-                    return;
-                }
-
-                // Otherwise, get a set of paths that lead from here to the destination edge switch.
-                Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
-                        srcConnectPoint.deviceId(),
-                        dstHost.location().deviceId());
-
-                if (paths.isEmpty()) {
-                    log.error("No paths available");
-                    context.block();
-                    return;
-                }
-
-                log.info("Setting new src IP to {}", sessionSharedAddress);
-                pickForwardPathIfPossible(paths, srcConnectPoint.port())
-                        .ifPresent(path -> installRuleChangeSrcIpAndForward(context, path.src().port(),
-                                sessionSharedAddress));
-                return;
-            } else {
-                log.error("Shouldn't be here");
-            }
-        }
+//        } else {
+//            Ip4Address sessionSharedAddress = sharedAddresses.iterator().next();
+//            // Check if it is the first device on the packet path
+//            // If so add to active FTP sessions
+//            HostId srcHostId = HostId.hostId(ethPacket.getSourceMAC());
+//            Host srcHost = hostService.getHost(srcHostId);
+//            if (srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) &&
+//                    srcConnectPoint.port().equals(srcHost.location().port())
+//            ) {
+//                log.info("First device on the FTP ACK packet path");
+//                Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
+//                if (dstHost == null) {
+//                    log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
+//                    return;
+//                }
+//
+//                // Otherwise, get a set of paths that lead from here to the destination edge switch.
+//                Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
+//                        srcConnectPoint.deviceId(),
+//                        dstHost.location().deviceId());
+//
+//                if (paths.isEmpty()) {
+//                    log.error("No paths available");
+//                    context.block();
+//                    return;
+//                }
+//
+//                log.info("Setting new src IP to {}", sessionSharedAddress);
+//                pickForwardPathIfPossible(paths, srcConnectPoint.port())
+//                        .ifPresent(path -> installRuleChangeSrcIpAndForward(context, path.src().port(),
+//                                sessionSharedAddress));
+//                return;
+//            } else {
+//                log.error("Shouldn't be here");
+//            }
+//        }
 
 
     }
