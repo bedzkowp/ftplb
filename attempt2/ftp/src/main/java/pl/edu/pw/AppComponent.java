@@ -23,7 +23,10 @@ import org.onlab.packet.*;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
 import org.onosproject.net.*;
-import org.onosproject.net.flow.*;
+import org.onosproject.net.flow.DefaultTrafficSelector;
+import org.onosproject.net.flow.DefaultTrafficTreatment;
+import org.onosproject.net.flow.TrafficSelector;
+import org.onosproject.net.flow.TrafficTreatment;
 import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
@@ -60,30 +63,20 @@ public class AppComponent {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowObjectiveService flowObjectiveService;
 
-    @Reference(cardinality = ReferenceCardinality.MANDATORY)
-    protected FlowRuleService flowRuleService; // TODO check or delete
-
     private static final String APPLICATION_NAME = "pl.edu.pw";
     private static final PacketPriority PACKET_INTERCEPT_PRIORITY = PacketPriority.MEDIUM;
-    private static final List<Integer> STANDARD_FTP_PORTS = Arrays.asList(20, 21);
     private static final int FLOW_PRIORITY = PACKET_INTERCEPT_PRIORITY.priorityValue() + 5;
-    private static final int FLOW_TIMEOUT_IN_SEC = 20;
+    private static final int FLOW_TIMEOUT_IN_SEC = 180;
+    /** Standard server port for a FTP session setup */
+    private static final int FTP_SERVER_PORT = 21;
 
-    /**
-     * Shared IP address
-     */
+    /** Shared IP address */
     private Ip4Address sharedAddress;
-    /**
-     * FTP servers assigned to shared IP address
-     */
+    /** FTP servers assigned to the shared IP address */
     private List<Ip4Address> serversAssignedToSharedAddress = new ArrayList<>();
-    /**
-     * Host IP to shared address redirect IP mapping
-     */
-    private Map<Ip4Address, Ip4Address> sharedAddressRedirectForHosts = new HashMap<>();
-    /**
-     * FTP session to changed IP address mapping
-     */
+    /** Client IP mapping to a redirect IP address */
+    private Map<Ip4Address, Ip4Address> clientsToRedirectIps = new HashMap<>();
+    /** FTP session mapping to a redirect IP address */
     private Map<FtpSessionKey, Ip4Address> activeFtpSessions = new HashMap<>();
 
     private FtpPacketProcessor ftpPacketProcessor = new FtpPacketProcessor();
@@ -97,9 +90,9 @@ public class AppComponent {
     @EqualsAndHashCode
     @ToString
     private class FtpSessionKey {
-        private PortNumber srcPort;
-        private Ip4Address srcIp;
-        private Ip4Address dstIp;
+        private PortNumber clientPort;
+        private Ip4Address clientIp;
+        private Ip4Address sharedIp;
     }
 
     private void setSharedAddress(Ip4Address newSharedAddress) {
@@ -124,7 +117,7 @@ public class AppComponent {
     private void clearTestConfig() {
         setSharedAddress(null);
         serversAssignedToSharedAddress.clear();
-        sharedAddressRedirectForHosts.clear();
+        clientsToRedirectIps.clear();
         activeFtpSessions.clear();
     }
 
@@ -169,264 +162,17 @@ public class AppComponent {
     }
 
     private Optional<Ip4Address> selectNextServerIpAddress(Ip4Address srcIp) {
-        log.info("Select next server IP. Current host-server mapping: {}", sharedAddressRedirectForHosts);
-        if (sharedAddressRedirectForHosts.containsKey(srcIp)) {
-            log.info("Cached IP for host: {} is: {}", srcIp, sharedAddressRedirectForHosts.get(srcIp));
-            return Optional.of(sharedAddressRedirectForHosts.get(srcIp));
+        log.info("Select next server IP. Current client-redirect mapping: {}", clientsToRedirectIps);
+        if (clientsToRedirectIps.containsKey(srcIp)) {
+            log.info("Saved redirect IP for client: {} is: {}", srcIp, clientsToRedirectIps.get(srcIp));
+            return Optional.of(clientsToRedirectIps.get(srcIp));
         } else {
             int index = random.nextInt(serversAssignedToSharedAddress.size());
             Ip4Address redirectIp = serversAssignedToSharedAddress.get(index);
-            sharedAddressRedirectForHosts.put(srcIp, redirectIp);
-            log.info("Selecting new value and putting into map. Key: {} value: {}", srcIp, redirectIp);
+            clientsToRedirectIps.put(srcIp, redirectIp);
+            log.info("Select new value and add mapping: key: {} value: {}", srcIp, redirectIp);
             return Optional.ofNullable(redirectIp);
         }
-    }
-
-    private void installRuleAndForward(PacketContext context, PortNumber outPort) {
-        log.info("Installing rule");
-        Ethernet inPkt = context.inPacket().parsed();
-        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getDestinationAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchInPort(context.inPacket().receivedFrom().port())
-                .matchEthSrc(inPkt.getSourceMAC())
-                .matchEthDst(inPkt.getDestinationMAC())
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(srcIpPrefix)
-                .matchIPDst(dstIpPrefix)
-                .matchIPProtocol(ipv4Packet.getProtocol())
-                .matchTcpSrc(TpPort.tpPort(tcpPacket.getSourcePort()))
-                .matchTcpDst(TpPort.tpPort(tcpPacket.getDestinationPort()))
-                .build();
-
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setOutput(outPort)
-                .build();
-
-        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(FLOW_PRIORITY)
-                .withFlag(ForwardingObjective.Flag.VERSATILE)
-                .fromApp(appId)
-                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
-                .add();
-
-        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
-
-        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
-        context.treatmentBuilder().setOutput(outPort);
-        context.send();
-        context.block();
-    }
-
-    private void installRuleAndForward(PacketContext context, PortNumber outPort, Ip4Address newDstIp) {
-        log.info("Installing rule with destination IP modification");
-        Ethernet inPkt = context.inPacket().parsed();
-        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getDestinationAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchInPort(context.inPacket().receivedFrom().port())
-                .matchEthSrc(inPkt.getSourceMAC())
-                .matchEthDst(inPkt.getDestinationMAC())
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(srcIpPrefix)
-                .matchIPDst(dstIpPrefix)
-                .matchIPProtocol(ipv4Packet.getProtocol())
-                .matchTcpSrc(TpPort.tpPort(tcpPacket.getSourcePort()))
-                .matchTcpDst(TpPort.tpPort(tcpPacket.getDestinationPort()))
-                .build();
-
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setIpDst(newDstIp)
-                .setOutput(outPort)
-                .build();
-
-        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(FLOW_PRIORITY)
-                .withFlag(ForwardingObjective.Flag.VERSATILE)
-                .fromApp(appId)
-                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
-                .add();
-
-        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
-
-        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
-        ipv4Packet.setDestinationAddress(newDstIp.toInt());
-
-        ipv4Packet.resetChecksum();
-        inPkt.setPayload(ipv4Packet);
-        inPkt.resetChecksum();
-        packetService.emit(new DefaultOutboundPacket(
-                context.inPacket().receivedFrom().deviceId(),
-                treatment,
-                ByteBuffer.wrap(inPkt.serialize())));
-        // context.block();
-        // context.treatmentBuilder().setIpDst(newDstIp).setOutput(outPort);
-        // context.send();
-        context.block();
-    }
-
-    private void installSymmetricalRuleChangeSrcIpAndForward(PacketContext context, PortNumber outPort, Ip4Address newSrcIp) {
-        log.info("Installing rule with src IP modification");
-        Ethernet inPkt = context.inPacket().parsed();
-        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getDestinationAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchInPort(outPort)
-                .matchEthSrc(inPkt.getDestinationMAC())
-                .matchEthDst(inPkt.getSourceMAC())
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(srcIpPrefix)
-                .matchIPDst(dstIpPrefix)
-                .matchIPProtocol(ipv4Packet.getProtocol())
-                .matchTcpSrc(TpPort.tpPort(tcpPacket.getDestinationPort()))
-                .matchTcpDst(TpPort.tpPort(tcpPacket.getSourcePort()))
-                .build();
-
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setIpSrc(newSrcIp)
-                .setOutput(context.inPacket().receivedFrom().port())
-                .build();
-
-        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(FLOW_PRIORITY)
-                .withFlag(ForwardingObjective.Flag.VERSATILE)
-                .fromApp(appId)
-                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
-                .add();
-
-        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
-
-//        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
-//        ipv4Packet.setSourceAddress(newSrcIp.toInt());
-//
-//        ipv4Packet.resetChecksum();
-//        inPkt.setPayload(ipv4Packet);
-//        inPkt.resetChecksum();
-//        packetService.emit(new DefaultOutboundPacket(
-//                context.inPacket().receivedFrom().deviceId(),
-//                treatment,
-//                ByteBuffer.wrap(inPkt.serialize())));
-////        context.treatmentBuilder().setIpDst(newSrcIp).setOutput(outPort);
-////        context.send();
-//        context.block();
-    }
-
-    private void installSymmetricalRuleChangeSrcIpAndForward(PacketContext context, PortNumber outPort, Ip4Address newDstIp, Ip4Address newSrcIp) {
-        log.info("Installing rule with src IP modification");
-        Ethernet inPkt = context.inPacket().parsed();
-        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(newDstIp, Ip4Prefix.MAX_MASK_LENGTH);
-        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchInPort(outPort)
-                .matchEthSrc(inPkt.getDestinationMAC())
-                .matchEthDst(inPkt.getSourceMAC())
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(srcIpPrefix)
-                .matchIPDst(dstIpPrefix)
-                .matchIPProtocol(ipv4Packet.getProtocol())
-                .matchTcpSrc(TpPort.tpPort(tcpPacket.getDestinationPort()))
-                .matchTcpDst(TpPort.tpPort(tcpPacket.getSourcePort()))
-                .build();
-
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setIpSrc(newSrcIp)
-                .setOutput(context.inPacket().receivedFrom().port())
-                .build();
-
-        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(FLOW_PRIORITY)
-                .withFlag(ForwardingObjective.Flag.VERSATILE)
-                .fromApp(appId)
-                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
-                .add();
-
-        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
-
-//        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
-//        ipv4Packet.setSourceAddress(newSrcIp.toInt());
-//
-//        ipv4Packet.resetChecksum();
-//        inPkt.setPayload(ipv4Packet);
-//        inPkt.resetChecksum();
-//        packetService.emit(new DefaultOutboundPacket(
-//                context.inPacket().receivedFrom().deviceId(),
-//                treatment,
-//                ByteBuffer.wrap(inPkt.serialize())));
-////        context.treatmentBuilder().setIpDst(newSrcIp).setOutput(outPort);
-////        context.send();
-//        context.block();
-    }
-
-
-    private void installRuleChangeSrcIpAndForward(PacketContext context, PortNumber outPort, Ip4Address newSrcIp) {
-        log.info("Installing rule with src IP modification");
-        Ethernet inPkt = context.inPacket().parsed();
-        IPv4 ipv4Packet = (IPv4) inPkt.getPayload();
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getSourceAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-        Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(ipv4Packet.getDestinationAddress(), Ip4Prefix.MAX_MASK_LENGTH);
-
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchInPort(context.inPacket().receivedFrom().port())
-                .matchEthSrc(inPkt.getSourceMAC())
-                .matchEthDst(inPkt.getDestinationMAC())
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(srcIpPrefix)
-                .matchIPDst(dstIpPrefix)
-                .matchIPProtocol(ipv4Packet.getProtocol())
-                .matchTcpSrc(TpPort.tpPort(tcpPacket.getSourcePort()))
-                .matchTcpDst(TpPort.tpPort(tcpPacket.getDestinationPort()))
-                .build();
-
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setIpSrc(newSrcIp)
-                .setOutput(outPort)
-                .build();
-
-        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(FLOW_PRIORITY)
-                .withFlag(ForwardingObjective.Flag.VERSATILE)
-                .fromApp(appId)
-                .makeTemporary(FLOW_TIMEOUT_IN_SEC)
-                .add();
-
-        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
-
-        log.info("Sending to device:port {}:{}", context.inPacket().receivedFrom().deviceId(), outPort);
-        ipv4Packet.setSourceAddress(newSrcIp.toInt());
-
-        ipv4Packet.resetChecksum();
-        inPkt.setPayload(ipv4Packet);
-        inPkt.resetChecksum();
-        packetService.emit(new DefaultOutboundPacket(
-                context.inPacket().receivedFrom().deviceId(),
-                treatment,
-                ByteBuffer.wrap(inPkt.serialize())));
-//        context.treatmentBuilder().setIpDst(newSrcIp).setOutput(outPort);
-//        context.send();
-        context.block();
     }
 
     private Optional<Path> pickForwardPathIfPossible(Set<Path> paths, PortNumber notToPort) {
@@ -458,6 +204,7 @@ public class AppComponent {
         }
     }
 
+    // TODO random MAC
     private void handleArpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint srcConnectPoint) {
         ARP arpPacket = (ARP) ethPacket.getPayload();
 
@@ -514,209 +261,177 @@ public class AppComponent {
         });
     }
 
-    private void handleFtpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint srcConnectPoint) {
+    private void handleFtpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint packetReceivedFrom) {
         IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
         if (ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
             return;
         }
-
         log.info("--------------------------------------------------------------");
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        if (tcpPacket.getPayload().serialize().length == 0) {
-            log.info("ACK: seq: {}, ack: {}, srcPort: {}, dstPort: {}",
-                    tcpPacket.getSequence(), tcpPacket.getAcknowledge(),
-                    tcpPacket.getSourcePort(), tcpPacket.getDestinationPort());
-            // return; // TODO delete
-        }
 
-        int srcPort = tcpPacket.getSourcePort();
+        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
+        int srcPort = tcpPacket.getSourcePort(); // TODO to portNumber
         int dstPort = tcpPacket.getDestinationPort();
-        if (!STANDARD_FTP_PORTS.contains(dstPort) &&
-                !STANDARD_FTP_PORTS.contains(srcPort)) {
+
+        // We ignore packets from/to port 20 since they are handled by the FWD app.
+        // A FTP sever is responsible for setting up a separate TCP connection for data transfer on port 20,
+        // so we do not need to worry about the shared IP address.
+        if (dstPort != FTP_SERVER_PORT) {
             return;
         }
 
-        log.info("Received FTP packet from device:port {}:{}",
-                srcConnectPoint.deviceId(),
-                srcConnectPoint.port());
+        MacAddress srcMac = ethPacket.getSourceMAC();
+        MacAddress dstMac = ethPacket.getDestinationMAC();
+        Ip4Address srcIp = Ip4Address.valueOf(ipv4Packet.getSourceAddress());
+        Ip4Address dstIp = Ip4Address.valueOf(ipv4Packet.getDestinationAddress());
 
-        log.info("ETH: srcMAC: {}, dstMAC: {}", ethPacket.getSourceMAC(), ethPacket.getDestinationMAC());
-
-        log.info("IP: srcIP: {}, dstIP: {}, checksum: {}",
-                Ip4Address.valueOf(ipv4Packet.getSourceAddress()),
-                Ip4Address.valueOf(ipv4Packet.getDestinationAddress()),
-                ipv4Packet.getChecksum());
-
-        log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}",
-                tcpPacket.getSourcePort(), tcpPacket.getDestinationPort(),
+        // For debugging purposes
+        log.info("Received FTP packet from device:port {}:{}", packetReceivedFrom.deviceId(), packetReceivedFrom.port()); // TODO rename srcCOnnectPOint to receivedFrom
+        log.info("ETH: srcMAC: {}, dstMAC: {}", srcMac, dstMac);
+        log.info("IP: srcIP: {}, dstIP: {}, checksum: {}", srcIp, dstIp, ipv4Packet.getChecksum());
+        log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}", srcPort, dstPort,
                 tcpPacket.getChecksum(), tcpPacket.getSequence(), tcpPacket.getAcknowledge());
 
-        // Check if packet is for or from the shared IP address
-        if (Ip4Address.valueOf(ipv4Packet.getDestinationAddress()).equals(sharedAddress)) { // TODO and srcAddress?
-            log.info("Packet with shared address as a destination");
-            FtpSessionKey key = new FtpSessionKey(PortNumber.portNumber(tcpPacket.getSourcePort()),
-                    Ip4Address.valueOf(ipv4Packet.getSourceAddress()),
-                    Ip4Address.valueOf(ipv4Packet.getDestinationAddress()));
+        // Check if the packet is for the current shared IP address
+        if (dstIp.equals(sharedAddress)) {
+            log.info("Packet with shared address: {} as a destination", sharedAddress);
+
+            Host srcHost = getHost(srcMac);
+            Host dstHost = getHost(dstMac);
 
             // Check if it is the first device on the packet path
-            // If so add to active FTP sessions
-            HostId srcHostId = HostId.hostId(ethPacket.getSourceMAC());
-            Host srcHost = hostService.getHost(srcHostId);
-            if (srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) &&
-                    srcConnectPoint.port().equals(srcHost.location().port())
+            if (packetReceivedFrom.deviceId().equals(srcHost.location().deviceId()) &&
+                    packetReceivedFrom.port().equals(srcHost.location().port())
             ) {
-                log.info("First device on packet path");
-                if (!sharedAddressRedirectForHosts.containsKey(key)) {
-                    log.info("Cached host-server mapping does not contain value for key: {}", key);
-                    HostId dstHostId = HostId.hostId(ethPacket.getDestinationMAC());
-                    Host dstHost2 = hostService.getHost(dstHostId);
-                    Ip4Address ip = dstHost2.ipAddresses().stream()
+                log.info("Packet arrived at first device on its path");
+
+                // TODO ignore MAC and draw once again
+                // Need to know the redirect server IP that was given by an ARP.
+                // Redirect server IP may be cached at host so it won't be present in the map.
+                // In such a case, need to add it manually.
+                if (!clientsToRedirectIps.containsKey(srcIp)) {
+                    Ip4Address redirectIp = dstHost.ipAddresses()
+                            .stream()
                             .filter(ipAddress -> serversAssignedToSharedAddress.contains(ipAddress.getIp4Address()))
-                            .iterator().next().getIp4Address(); // TODO ignore ARP and use only dst MAC and IP
-                    log.info("Putting cached address for key: {} to: {}",
-                            Ip4Address.valueOf(ipv4Packet.getSourceAddress()), ip);
-                    sharedAddressRedirectForHosts.put(Ip4Address.valueOf(ipv4Packet.getSourceAddress()), ip);
+                            .iterator().next().getIp4Address();
+                    log.info("Add client: {} to redirect IP: {} mapping", srcIp, redirectIp);
+                    clientsToRedirectIps.put(srcIp, redirectIp);
                 }
-                log.info("Adding new FTP session. Key: {}, value: {}", key,
-                        sharedAddressRedirectForHosts.get(Ip4Address.valueOf(ipv4Packet.getSourceAddress())));
-                activeFtpSessions.put(key,
-                        sharedAddressRedirectForHosts.get(Ip4Address.valueOf(ipv4Packet.getSourceAddress())));
-                log.info("Current active sessions: {}", activeFtpSessions);
-                log.info("Current host-server redirects: {}", sharedAddressRedirectForHosts);
+
+                // Check if there is an active FTP session for the IPs and port
+                FtpSessionKey sessionKey = new FtpSessionKey(PortNumber.portNumber(srcPort), srcIp, dstIp);
+                if (!activeFtpSessions.containsKey(sessionKey)) {
+                    log.info("Add new FTP session: key: {} value: {}", sessionKey, clientsToRedirectIps.get(srcIp));
+                    activeFtpSessions.put(sessionKey, clientsToRedirectIps.get(srcIp));
+                }
+
+                log.info("Current active FTP sessions: {}", activeFtpSessions);
+                log.info("Current client-server redirects: {}", clientsToRedirectIps);
+
+                // Get available paths that lead to the destination
+                Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
+                        packetReceivedFrom.deviceId(),
+                        dstHost.location().deviceId());
+
+                if (paths.isEmpty()) {
+                    log.error("No paths available from: {} to: {}",
+                            packetReceivedFrom.deviceId(), dstHost.location().deviceId());
+                    context.block();
+                    return;
+                }
+
+                Ip4Address newDstIp = activeFtpSessions.get(sessionKey);
+                pickForwardPathIfPossible(paths, packetReceivedFrom.port())
+                        .ifPresent(path -> {
+                            PortNumber outPort = path.src().port();
+
+                            // Install rule with destination IP modification
+                            log.info("Install rule with destination IP modification");
+                            Ip4Prefix srcIpPrefix = Ip4Prefix.valueOf(srcIp, Ip4Prefix.MAX_MASK_LENGTH);
+                            Ip4Prefix dstIpPrefix = Ip4Prefix.valueOf(dstIp, Ip4Prefix.MAX_MASK_LENGTH);
+
+                            TrafficSelector selector = DefaultTrafficSelector.builder()
+                                    .matchInPort(packetReceivedFrom.port())
+                                    .matchEthSrc(srcMac)
+                                    .matchEthDst(dstMac)
+                                    .matchEthType(Ethernet.TYPE_IPV4)
+                                    .matchIPSrc(srcIpPrefix)
+                                    .matchIPDst(dstIpPrefix)
+                                    .matchIPProtocol(ipv4Packet.getProtocol())
+                                    .matchTcpSrc(TpPort.tpPort(srcPort))
+                                    .matchTcpDst(TpPort.tpPort(dstPort))
+                                    .build();
+
+                            TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                                    .setIpDst(newDstIp)
+                                    .setOutput(outPort)
+                                    .build();
+
+                            ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
+                                    .withSelector(selector)
+                                    .withTreatment(treatment)
+                                    .withPriority(FLOW_PRIORITY)
+                                    .withFlag(ForwardingObjective.Flag.VERSATILE)
+                                    .fromApp(appId)
+                                    .makeTemporary(FLOW_TIMEOUT_IN_SEC)
+                                    .add();
+
+                            flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
+
+                            // Install symmetrical rule with source IP modification
+                            log.info("Install rule with source IP modification");
+                            Ip4Prefix newDstIpPrefix = Ip4Prefix.valueOf(newDstIp, Ip4Prefix.MAX_MASK_LENGTH);
+
+                            TrafficSelector symmetricalSelector = DefaultTrafficSelector.builder()
+                                    .matchInPort(outPort)
+                                    .matchEthSrc(dstMac)
+                                    .matchEthDst(srcMac)
+                                    .matchEthType(Ethernet.TYPE_IPV4)
+                                    .matchIPSrc(newDstIpPrefix)
+                                    .matchIPDst(srcIpPrefix)
+                                    .matchIPProtocol(ipv4Packet.getProtocol())
+                                    .matchTcpSrc(TpPort.tpPort(dstPort))
+                                    .matchTcpDst(TpPort.tpPort(srcPort))
+                                    .build();
+
+                            TrafficTreatment symmetricalTreatment = DefaultTrafficTreatment.builder()
+                                    .setIpSrc(dstIp)
+                                    .setOutput(context.inPacket().receivedFrom().port())
+                                    .build();
+
+                            ForwardingObjective symmetricalForwardingObjective = DefaultForwardingObjective.builder()
+                                    .withSelector(symmetricalSelector)
+                                    .withTreatment(symmetricalTreatment)
+                                    .withPriority(FLOW_PRIORITY)
+                                    .withFlag(ForwardingObjective.Flag.VERSATILE)
+                                    .fromApp(appId)
+                                    .makeTemporary(FLOW_TIMEOUT_IN_SEC)
+                                    .add();
+
+                            flowObjectiveService.forward(packetReceivedFrom.deviceId(), symmetricalForwardingObjective);
+
+                            // Change destination IP and forward packet
+                            log.info("Send packet to device:port {}:{}", packetReceivedFrom.deviceId(), outPort);
+                            ipv4Packet.setDestinationAddress(newDstIp.toInt());
+                            ipv4Packet.resetChecksum();
+                            ethPacket.setPayload(ipv4Packet);
+                            ethPacket.resetChecksum();
+                            packetService.emit(new DefaultOutboundPacket(
+                                    packetReceivedFrom.deviceId(),
+                                    symmetricalTreatment,
+                                    ByteBuffer.wrap(ethPacket.serialize())));
+                            context.block();
+                        });
             }
-
-            Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
-            if (dstHost == null) {
-                log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
-                return;
-            }
-
-            // Are we on an edge switch that our destination is on?
-            // If so, simply forward out to the destination and bail.
-//            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
-//                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
-//                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
-//                log.info("Setting new target IP for packet");
-//                log.info("Current sessions: {}", activeFtpSessions);
-//                Ip4Address newDstIp = activeFtpSessions.get(key);
-//                log.info("Selected value: {} for key: {}", newDstIp, key);
-//                installRuleAndForward(context, dstHost.location().port(), newDstIp);
-//                installSymmetricalRuleChangeSrcIpAndForward(context, dstHost.location().port(), sharedAddress);
-//                return;
-//            }
-
-            // Otherwise, get a set of paths that lead from here to the destination edge switch.
-            Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
-                    srcConnectPoint.deviceId(),
-                    dstHost.location().deviceId());
-
-            if (paths.isEmpty()) {
-                log.error("No paths available");
-                context.block();
-                return;
-            }
-
-            Ip4Address newDstIp = activeFtpSessions.get(key);
-            pickForwardPathIfPossible(paths, srcConnectPoint.port())
-                    .ifPresent(path -> {
-                        installRuleAndForward(context, path.src().port(), newDstIp);
-                        installSymmetricalRuleChangeSrcIpAndForward(context, path.src().port(), newDstIp, sharedAddress);
-                    }); // TODO
-            return;
         }
-//        } else if (Ip4Address.valueOf(ipv4Packet.getSourceAddress()).equals(sharedAddress)) {
-//            log.info("Packet with shared address as a source");
-//            Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
-//            if (dstHost == null) {
-//                log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
-//                return;
-//            }
-//
-//            // Are we on an edge switch that our destination is on?
-//            // If so, simply forward out to the destination and bail.
-//            if (srcConnectPoint.deviceId().equals(dstHost.location().deviceId()) &&
-//                    !srcConnectPoint.port().equals(dstHost.location().port())) { // TODO why?
-//                log.info("We are on an edge switch: {}", srcConnectPoint.deviceId());
-//                log.info("Simply forward.");
-//                installRuleAndForward(context, dstHost.location().port());
-//                return;
-//            }
-//
-//            // Otherwise, get a set of paths that lead from here to the destination edge switch.
-//            Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
-//                    srcConnectPoint.deviceId(),
-//                    dstHost.location().deviceId());
-//
-//            if (paths.isEmpty()) {
-//                log.error("No paths available");
-//                context.block();
-//                return;
-//            }
-//
-//            pickForwardPathIfPossible(paths, srcConnectPoint.port())
-//                    .ifPresent(path -> installRuleAndForward(context, path.src().port()));
-//            return;// TODO forward
-//        }
-//        log.info("Should be handled by FWD");
-//
-//        Set<Ip4Address> sharedAddresses = activeFtpSessions.keySet()
-//                .stream()
-//                .filter(key -> key.srcPort.equals(PortNumber.portNumber(tcpPacket.getDestinationPort())) &&
-//                        key.srcIp.equals(Ip4Address.valueOf(ipv4Packet.getDestinationAddress())) &&
-//                        activeFtpSessions.get(key).equals(Ip4Address.valueOf(ipv4Packet.getSourceAddress())))
-//                .map(key -> key.dstIp)
-//                .collect(Collectors.toSet());
-//
-//
-//        if (sharedAddresses.size() != 1) {
-//            log.error("Shared addresses size is other than 1: {}", sharedAddresses);
-//        } else if (sharedAddresses.size() == 0) {
-//            if (tcpPacket.getSourcePort() == 20) {
-//                // TODO add FTP port to key and check if 21 session has its corresponding 20 session
-//                log.info("Receiving or sending data on 20 port");
-//                activeFtpSessions.put(new FtpSessionKey(tcpPacket.getDestinationPort(),
-//                        Ip4Address.valueOf(ipv4Packet.getDestinationAddress()),
-//                        ))
-////                activeFtpSessions.keySet().stream()
-////                        .filter(key -> key.)
-//            }
-//        } else {
-//            Ip4Address sessionSharedAddress = sharedAddresses.iterator().next();
-//            // Check if it is the first device on the packet path
-//            // If so add to active FTP sessions
-//            HostId srcHostId = HostId.hostId(ethPacket.getSourceMAC());
-//            Host srcHost = hostService.getHost(srcHostId);
-//            if (srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) &&
-//                    srcConnectPoint.port().equals(srcHost.location().port())
-//            ) {
-//                log.info("First device on the FTP ACK packet path");
-//                Host dstHost = hostService.getHost(HostId.hostId(ethPacket.getDestinationMAC()));
-//                if (dstHost == null) {
-//                    log.error("Destination host with MAC: {} not found", ethPacket.getDestinationMAC());
-//                    return;
-//                }
-//
-//                // Otherwise, get a set of paths that lead from here to the destination edge switch.
-//                Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
-//                        srcConnectPoint.deviceId(),
-//                        dstHost.location().deviceId());
-//
-//                if (paths.isEmpty()) {
-//                    log.error("No paths available");
-//                    context.block();
-//                    return;
-//                }
-//
-//                log.info("Setting new src IP to {}", sessionSharedAddress);
-//                pickForwardPathIfPossible(paths, srcConnectPoint.port())
-//                        .ifPresent(path -> installRuleChangeSrcIpAndForward(context, path.src().port(),
-//                                sessionSharedAddress));
-//                return;
-//            } else {
-//                log.error("Shouldn't be here");
-//            }
-//        }
+    }
 
-
+    private Host getHost(MacAddress macAddress) {
+        HostId hostId = HostId.hostId(macAddress);
+        Host host = hostService.getHost(hostId);
+        if (host == null) {
+            throw new RuntimeException("No host found for the MAC address: " + macAddress);
+        } else {
+            return host;
+        }
     }
 }
