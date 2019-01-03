@@ -19,10 +19,22 @@ import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
-import org.onlab.packet.*;
+import org.onlab.packet.ARP;
+import org.onlab.packet.EthType;
+import org.onlab.packet.Ethernet;
+import org.onlab.packet.IPv4;
+import org.onlab.packet.Ip4Address;
+import org.onlab.packet.Ip4Prefix;
+import org.onlab.packet.MacAddress;
+import org.onlab.packet.TCP;
+import org.onlab.packet.TpPort;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
-import org.onosproject.net.*;
+import org.onosproject.net.ConnectPoint;
+import org.onosproject.net.Host;
+import org.onosproject.net.HostId;
+import org.onosproject.net.Path;
+import org.onosproject.net.PortNumber;
 import org.onosproject.net.flow.DefaultTrafficSelector;
 import org.onosproject.net.flow.DefaultTrafficTreatment;
 import org.onosproject.net.flow.TrafficSelector;
@@ -31,20 +43,35 @@ import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
 import org.onosproject.net.host.HostService;
-import org.onosproject.net.packet.*;
+import org.onosproject.net.packet.DefaultOutboundPacket;
+import org.onosproject.net.packet.InboundPacket;
+import org.onosproject.net.packet.PacketContext;
+import org.onosproject.net.packet.PacketPriority;
+import org.onosproject.net.packet.PacketProcessor;
+import org.onosproject.net.packet.PacketService;
 import org.onosproject.net.topology.TopologyService;
-import org.osgi.service.component.annotations.*;
+import org.osgi.service.component.annotations.Activate;
+import org.osgi.service.component.annotations.Component;
+import org.osgi.service.component.annotations.Deactivate;
+import org.osgi.service.component.annotations.Reference;
+import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Random;
+import java.util.Set;
 
 /**
  * Application for FTP load balancig.
  */
-@Component(immediate = true)
-public class AppComponent {
+@Component(immediate = true, service = {FtpApp.class})
+public class FtpApp {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
 
@@ -90,14 +117,36 @@ public class AppComponent {
     @Getter
     @EqualsAndHashCode
     @ToString
-    private class FtpSessionKey {
+    class FtpSessionKey {
         private PortNumber clientPort;
         private Ip4Address clientIp;
         private Ip4Address sharedIp;
     }
 
-    private void setSharedAddress(Ip4Address newSharedAddress) {
-        sharedAddress = newSharedAddress;
+    Ip4Address getSharedAddress() {
+        return sharedAddress;
+    }
+
+    void setSharedAddress(Ip4Address sharedAddress) {
+        this.sharedAddress = sharedAddress;
+    }
+
+    List<Ip4Address> getServersAssignedToSharedAddress() {
+        return serversAssignedToSharedAddress;
+    }
+
+    void assignServerToSharedAddress(Ip4Address serverIp) {
+        if (!serversAssignedToSharedAddress.contains(serverIp)) {
+            serversAssignedToSharedAddress.add(serverIp);
+        }
+    }
+
+    void unassignServerFromSharedAddress(Ip4Address serverIp) {
+        serversAssignedToSharedAddress.remove(serverIp);
+    }
+
+    Map<FtpSessionKey, Ip4Address> getActiveFtpSessions() {
+        return activeFtpSessions;
     }
 
     // TODO delete
