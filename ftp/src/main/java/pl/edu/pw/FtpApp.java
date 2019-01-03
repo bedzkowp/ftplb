@@ -160,13 +160,13 @@ public class FtpApp {
         return activeFtpSessions;
     }
 
-    // TODO delete
+    // For tests
     private static final Ip4Address TEST_SHARED_ADDRESS = Ip4Address.valueOf("10.0.1.20");
     private static final Ip4Address TEST_SERVER_1 = Ip4Address.valueOf("10.0.1.1");
     private static final Ip4Address TEST_SERVER_2 = Ip4Address.valueOf("10.0.1.2");
     private static final Ip4Address TEST_SERVER_3 = Ip4Address.valueOf("10.0.1.3");
 
-    // TODO load from REST and check for correctness
+    // For tests
     private void setupTestConfig() {
         setSharedAddress(TEST_SHARED_ADDRESS);
         serversAssignedToSharedAddress.add(TEST_SERVER_1);
@@ -174,7 +174,7 @@ public class FtpApp {
         serversAssignedToSharedAddress.add(TEST_SERVER_3);
     }
 
-    // TODO delete
+    // For tests
     private void clearTestConfig() {
         setSharedAddress(null);
         serversAssignedToSharedAddress.clear();
@@ -188,7 +188,7 @@ public class FtpApp {
         // Priority must be higher (lower in number) than the FWD app (which is "director(2)")
         packetService.addProcessor(ftpPacketProcessor, PacketProcessor.director(1));
         flowRuleService.addListener(ftpRuleListener);
-        setupTestConfig(); // TODO delete
+        setupTestConfig();
         requestIpv4Intercepts();
         log.info("Started: " + appId.name());
     }
@@ -258,7 +258,6 @@ public class FtpApp {
         }
     }
 
-    // TODO random MAC
     private void handleArpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint packetReceivedFrom) {
         ARP arpPacket = (ARP) ethPacket.getPayload();
 
@@ -323,7 +322,7 @@ public class FtpApp {
         log.info("--------------------------------------------------------------");
 
         TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        int srcPort = tcpPacket.getSourcePort(); // TODO to portNumber
+        int srcPort = tcpPacket.getSourcePort();
         int dstPort = tcpPacket.getDestinationPort();
 
         // We ignore packets from/to port 20 since they are handled by the FWD app.
@@ -358,7 +357,6 @@ public class FtpApp {
             ) {
                 log.info("Packet arrived at first device on its path");
 
-                // TODO ignore MAC and draw once again
                 // Need to know the redirect server IP that was given by an ARP.
                 // Redirect server IP may be cached at host so it won't be present in the map.
                 // In such a case, need to add it manually.
