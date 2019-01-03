@@ -19,15 +19,7 @@ import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
-import org.onlab.packet.ARP;
-import org.onlab.packet.EthType;
-import org.onlab.packet.Ethernet;
-import org.onlab.packet.IPv4;
-import org.onlab.packet.Ip4Address;
-import org.onlab.packet.Ip4Prefix;
-import org.onlab.packet.MacAddress;
-import org.onlab.packet.TCP;
-import org.onlab.packet.TpPort;
+import org.onlab.packet.*;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
 import org.onosproject.net.ConnectPoint;
@@ -37,8 +29,15 @@ import org.onosproject.net.Path;
 import org.onosproject.net.PortNumber;
 import org.onosproject.net.flow.DefaultTrafficSelector;
 import org.onosproject.net.flow.DefaultTrafficTreatment;
+import org.onosproject.net.flow.FlowRule;
+import org.onosproject.net.flow.FlowRuleEvent;
+import org.onosproject.net.flow.FlowRuleListener;
+import org.onosproject.net.flow.FlowRuleService;
 import org.onosproject.net.flow.TrafficSelector;
 import org.onosproject.net.flow.TrafficTreatment;
+import org.onosproject.net.flow.criteria.Criterion;
+import org.onosproject.net.flow.criteria.IPCriterion;
+import org.onosproject.net.flow.criteria.TcpPortCriterion;
 import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
 import org.onosproject.net.flowobjective.ForwardingObjective;
@@ -90,11 +89,15 @@ public class FtpApp {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowObjectiveService flowObjectiveService;
 
-    private static final String APPLICATION_NAME = "pl.edu.pw";
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected FlowRuleService flowRuleService;
+
+    private static final String APPLICATION_NAME = "pl.edu.pw.ftplb";
     private static final PacketPriority PACKET_INTERCEPT_PRIORITY = PacketPriority.MEDIUM;
     private static final int FLOW_PRIORITY = PACKET_INTERCEPT_PRIORITY.priorityValue() + 5;
-    // Default Windows FTP server timeout + 60s
-    private static final int FLOW_TIMEOUT_IN_SEC = 180;
+    // Default Windows FTP server timeout + 60s = 180s
+    // Default Linux FTP server timeout + 1 min = 16 min = 960 s
+    private static final int FLOW_TIMEOUT_IN_SEC = 900;
     /** Standard server port for a FTP session setup */
     private static final int FTP_SERVER_PORT = 21;
 
@@ -108,9 +111,9 @@ public class FtpApp {
     private Map<FtpSessionKey, Ip4Address> activeFtpSessions = new HashMap<>();
 
     private FtpPacketProcessor ftpPacketProcessor = new FtpPacketProcessor();
+    private FlowRuleListener ftpRuleListener = new FtpFlowListener();
     private Random random = new Random();
     private ApplicationId appId;
-    private TrafficSelector arpSelector;
     private TrafficSelector ipv4Selector;
 
     @AllArgsConstructor
@@ -129,6 +132,14 @@ public class FtpApp {
 
     void setSharedAddress(Ip4Address sharedAddress) {
         this.sharedAddress = sharedAddress;
+        if (ipv4Selector != null) {
+            log.info("Withdrawing IPv4 intercepts");
+            withdrawIpv4Intercepts();
+        }
+        if (sharedAddress != null) {
+            log.info("Requesting IPv4 intercepts");
+            requestIpv4Intercepts();
+        }
     }
 
     List<Ip4Address> getServersAssignedToSharedAddress() {
@@ -176,39 +187,32 @@ public class FtpApp {
         appId = coreService.registerApplication(APPLICATION_NAME);
         // Priority must be higher (lower in number) than the FWD app (which is "director(2)")
         packetService.addProcessor(ftpPacketProcessor, PacketProcessor.director(1));
+        flowRuleService.addListener(ftpRuleListener);
         setupTestConfig(); // TODO delete
-        requestIntercepts();
+        requestIpv4Intercepts();
         log.info("Started: " + appId.name());
     }
 
     @Deactivate
     protected void deactivate() {
         packetService.removeProcessor(ftpPacketProcessor);
-        ftpPacketProcessor = null;
-        withdrawIntercepts();
-        // TODO drop all flows installed by this app
+        flowRuleService.removeListener(ftpRuleListener);
+        withdrawIpv4Intercepts();
         clearTestConfig();
         log.info("Stopped: " + appId.name());
     }
 
-    // This is not necessary when ProxyARP and FWD apps are activated
-    private void requestIntercepts() {
-        arpSelector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_ARP)
-                .build();
-
+    private void requestIpv4Intercepts() {
         ipv4Selector = DefaultTrafficSelector.builder()
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .matchIPDst(Ip4Prefix.valueOf(sharedAddress, Ip4Prefix.MAX_MASK_LENGTH))
                 .build();
-
-        packetService.requestPackets(arpSelector, PACKET_INTERCEPT_PRIORITY, appId);
         packetService.requestPackets(ipv4Selector, PACKET_INTERCEPT_PRIORITY, appId);
     }
 
-    private void withdrawIntercepts() {
-        packetService.cancelPackets(arpSelector, PACKET_INTERCEPT_PRIORITY, appId);
+    private void withdrawIpv4Intercepts() {
         packetService.cancelPackets(ipv4Selector, PACKET_INTERCEPT_PRIORITY, appId);
+        ipv4Selector = null;
     }
 
     private Optional<Ip4Address> selectNextServerIpAddress(Ip4Address srcIp) {
@@ -237,7 +241,7 @@ public class FtpApp {
         public void process(PacketContext context) {
             InboundPacket inPacket = context.inPacket();
             Ethernet ethPacket = inPacket.parsed();
-            ConnectPoint srcConnectPoint = inPacket.receivedFrom();
+            ConnectPoint packetReceivedFrom = inPacket.receivedFrom();
 
             if (ethPacket == null) {
                 return;
@@ -245,17 +249,17 @@ public class FtpApp {
 
             switch (EthType.EtherType.lookup(ethPacket.getEtherType())) {
                 case ARP:
-                    handleArpPackets(context, ethPacket, srcConnectPoint);
+                    handleArpPackets(context, ethPacket, packetReceivedFrom);
                     break;
                 case IPV4:
-                    handleFtpPackets(context, ethPacket, srcConnectPoint);
+                    handleFtpPackets(context, ethPacket, packetReceivedFrom);
                     break;
             }
         }
     }
 
     // TODO random MAC
-    private void handleArpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint srcConnectPoint) {
+    private void handleArpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint packetReceivedFrom) {
         ARP arpPacket = (ARP) ethPacket.getPayload();
 
         if (arpPacket.getOpCode() != ARP.OP_REQUEST) {
@@ -277,8 +281,8 @@ public class FtpApp {
         // Check if it is the first device on the ARP packet path
         HostId srcHostId = HostId.hostId(MacAddress.valueOf(arpPacket.getSenderHardwareAddress()));
         Host srcHost = hostService.getHost(srcHostId);
-        if (!srcConnectPoint.deviceId().equals(srcHost.location().deviceId()) ||
-                !srcConnectPoint.port().equals(srcHost.location().port())
+        if (!packetReceivedFrom.deviceId().equals(srcHost.location().deviceId()) ||
+                !packetReceivedFrom.port().equals(srcHost.location().port())
         ) {
             return;
         }
@@ -294,16 +298,16 @@ public class FtpApp {
 
                 Ethernet arpReply = ARP.buildArpReply(targetAddress, selectedServerMac, ethPacket);
                 TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                        .setOutput(srcConnectPoint.port())
+                        .setOutput(packetReceivedFrom.port())
                         .build();
 
                 log.info("Emitting packet with targetMac: {} to device:port {}:{}",
                         MacAddress.valueOf(((ARP) arpReply.getPayload()).getTargetHardwareAddress()),
-                        srcConnectPoint.deviceId(),
-                        srcConnectPoint.port());
+                        packetReceivedFrom.deviceId(),
+                        packetReceivedFrom.port());
 
                 packetService.emit(new DefaultOutboundPacket(
-                        srcConnectPoint.deviceId(),
+                        packetReceivedFrom.deviceId(),
                         treatment,
                         ByteBuffer.wrap(arpReply.serialize())));
                 context.block();
@@ -335,7 +339,7 @@ public class FtpApp {
         Ip4Address dstIp = Ip4Address.valueOf(ipv4Packet.getDestinationAddress());
 
         // For debugging purposes
-        log.info("Received FTP packet from device:port {}:{}", packetReceivedFrom.deviceId(), packetReceivedFrom.port()); // TODO rename srcCOnnectPOint to receivedFrom
+        log.info("Received FTP packet from device:port {}:{}", packetReceivedFrom.deviceId(), packetReceivedFrom.port());
         log.info("ETH: srcMAC: {}, dstMAC: {}", srcMac, dstMac);
         log.info("IP: srcIP: {}, dstIP: {}, checksum: {}", srcIp, dstIp, ipv4Packet.getChecksum());
         log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}", srcPort, dstPort,
@@ -482,6 +486,31 @@ public class FtpApp {
             throw new RuntimeException("No host found for the MAC address: " + macAddress);
         } else {
             return host;
+        }
+    }
+
+    // Listens for removed flows and drop sessions
+    private class FtpFlowListener implements FlowRuleListener {
+        @Override
+        public void event(FlowRuleEvent event) {
+            handleEvent(event);
+        }
+    }
+
+    private void handleEvent(FlowRuleEvent event) {
+        FlowRule flowRule = event.subject();
+        if (event.type() == FlowRuleEvent.Type.RULE_REMOVED && flowRule.appId() == appId.id()) {
+            IPCriterion srcIpCriterion = (IPCriterion) flowRule.selector().getCriterion(Criterion.Type.IPV4_SRC);
+            IPCriterion dstIpCriterion = (IPCriterion) flowRule.selector().getCriterion(Criterion.Type.IPV4_DST);
+            TcpPortCriterion srcPortCriterion = (TcpPortCriterion) flowRule.selector().getCriterion(Criterion.Type.TCP_SRC);
+
+            Ip4Address srcIp = srcIpCriterion.ip().getIp4Prefix().address();
+            Ip4Address dstIp = dstIpCriterion.ip().getIp4Prefix().address();
+            PortNumber srcPort = PortNumber.portNumber(srcPortCriterion.tcpPort().toInt());
+
+            FtpSessionKey sessionKey = new FtpSessionKey(srcPort, srcIp, dstIp);
+            Ip4Address value = activeFtpSessions.remove(sessionKey);
+            log.info("Removed session: {}, value: {} due to flow removal", sessionKey, value);
         }
     }
 }
