@@ -1,0 +1,293 @@
+{
+	"info": {
+		"_postman_id": "1811835e-cf0e-4f45-af56-acdf2faa8524",
+		"name": "FTP Load Balancing",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "GET shared address",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "956b541a-61d7-46ce-9308-44184022e86d",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/shared-address",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"shared-address"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "PUT shared address",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "438e74fc-4eb2-4084-a260-1a08c80741aa",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "PUT",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/shared-address/10.0.1.20",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"shared-address",
+						"10.0.1.20"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "DELETE shared address",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "759ddd1b-dd50-484d-a5d8-7d831e98a53e",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "DELETE",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/shared-address",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"shared-address"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "GET servers",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "759ddd1b-dd50-484d-a5d8-7d831e98a53e",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/servers",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"servers"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "PUT servers",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "759ddd1b-dd50-484d-a5d8-7d831e98a53e",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "PUT",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/servers/10.0.1.3",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"servers",
+						"10.0.1.3"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "DELETE servers",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "759ddd1b-dd50-484d-a5d8-7d831e98a53e",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "DELETE",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/servers/10.0.1.3",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"servers",
+						"10.0.1.3"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "GET sessions",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"id": "45f790f9-47d2-424e-9427-5e351b478b07",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "localhost:8181/onos/ftp/sessions",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"onos",
+						"ftp",
+						"sessions"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"auth": {
+		"type": "basic",
+		"basic": [
+			{
+				"key": "password",
+				"value": "karaf",
+				"type": "string"
+			},
+			{
+				"key": "username",
+				"value": "karaf",
+				"type": "string"
+			}
+		]
+	}
+}

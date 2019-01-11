@@ -19,7 +19,15 @@ import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
-import org.onlab.packet.*;
+import org.onlab.packet.ARP;
+import org.onlab.packet.EthType;
+import org.onlab.packet.Ethernet;
+import org.onlab.packet.IPv4;
+import org.onlab.packet.Ip4Address;
+import org.onlab.packet.Ip4Prefix;
+import org.onlab.packet.MacAddress;
+import org.onlab.packet.TCP;
+import org.onlab.packet.TpPort;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
 import org.onosproject.net.ConnectPoint;
@@ -105,8 +113,6 @@ public class FtpApp {
     private Ip4Address sharedAddress;
     /** FTP servers assigned to the shared IP address */
     private List<Ip4Address> serversAssignedToSharedAddress = new ArrayList<>();
-    /** Client IP mapping to a redirect IP address */
-    private Map<Ip4Address, Ip4Address> clientsToRedirectIps = new HashMap<>();
     /** FTP session mapping to a redirect IP address */
     private Map<FtpSessionKey, Ip4Address> activeFtpSessions = new HashMap<>();
 
@@ -178,7 +184,6 @@ public class FtpApp {
     private void clearTestConfig() {
         setSharedAddress(null);
         serversAssignedToSharedAddress.clear();
-        clientsToRedirectIps.clear();
         activeFtpSessions.clear();
     }
 
@@ -215,17 +220,13 @@ public class FtpApp {
         ipv4Selector = null;
     }
 
-    private Optional<Ip4Address> selectNextServerIpAddress(Ip4Address srcIp) {
-        log.info("Select next server IP. Current client-redirect mapping: {}", clientsToRedirectIps);
-        if (clientsToRedirectIps.containsKey(srcIp)) {
-            log.info("Saved redirect IP for client: {} is: {}", srcIp, clientsToRedirectIps.get(srcIp));
-            return Optional.of(clientsToRedirectIps.get(srcIp));
+    private Optional<Ip4Address> selectNextServerIpAddress() {
+        if (serversAssignedToSharedAddress.size() == 0) {
+            return Optional.empty();
         } else {
             int index = random.nextInt(serversAssignedToSharedAddress.size());
             Ip4Address redirectIp = serversAssignedToSharedAddress.get(index);
-            clientsToRedirectIps.put(srcIp, redirectIp);
-            log.info("Select new value and add mapping: key: {} value: {}", srcIp, redirectIp);
-            return Optional.ofNullable(redirectIp);
+            return Optional.of(redirectIp);
         }
     }
 
@@ -260,12 +261,10 @@ public class FtpApp {
 
     private void handleArpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint packetReceivedFrom) {
         ARP arpPacket = (ARP) ethPacket.getPayload();
-
         if (arpPacket.getOpCode() != ARP.OP_REQUEST) {
             return;
         }
 
-        Ip4Address srcIp = Ip4Address.valueOf(arpPacket.getSenderProtocolAddress());
         Ip4Address targetAddress = Ip4Address.valueOf(arpPacket.getTargetProtocolAddress());
         if (!targetAddress.equals(sharedAddress)) {
             return;
@@ -278,78 +277,68 @@ public class FtpApp {
                 Ip4Address.valueOf(arpPacket.getTargetProtocolAddress()));
 
         // Check if it is the first device on the ARP packet path
-        HostId srcHostId = HostId.hostId(MacAddress.valueOf(arpPacket.getSenderHardwareAddress()));
-        Host srcHost = hostService.getHost(srcHostId);
+        Host srcHost = getHost(MacAddress.valueOf(arpPacket.getSenderHardwareAddress()));
         if (!packetReceivedFrom.deviceId().equals(srcHost.location().deviceId()) ||
                 !packetReceivedFrom.port().equals(srcHost.location().port())
         ) {
             return;
         }
 
-        selectNextServerIpAddress(srcIp).ifPresent((selectedServerIp) -> {
-            Set<Host> hosts = hostService.getHostsByIp(selectedServerIp);
-            if (hosts.size() == 0) {
-                log.error("No host found for the IP address: {}", selectedServerIp);
-            } else if (hosts.size() > 1) {
-                log.error("Found {} hosts with the same IP address", hosts.size());
-            } else {
-                MacAddress selectedServerMac = hosts.iterator().next().mac();
+        Ethernet arpReply = ARP.buildArpReply(targetAddress, MacAddress.ZERO, ethPacket);
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setOutput(packetReceivedFrom.port())
+                .build();
 
-                Ethernet arpReply = ARP.buildArpReply(targetAddress, selectedServerMac, ethPacket);
-                TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                        .setOutput(packetReceivedFrom.port())
-                        .build();
+        log.info("Emitting packet with targetMac: {} to device:port {}:{}",
+                MacAddress.valueOf(((ARP) arpReply.getPayload()).getTargetHardwareAddress()),
+                packetReceivedFrom.deviceId(),
+                packetReceivedFrom.port());
 
-                log.info("Emitting packet with targetMac: {} to device:port {}:{}",
-                        MacAddress.valueOf(((ARP) arpReply.getPayload()).getTargetHardwareAddress()),
-                        packetReceivedFrom.deviceId(),
-                        packetReceivedFrom.port());
-
-                packetService.emit(new DefaultOutboundPacket(
-                        packetReceivedFrom.deviceId(),
-                        treatment,
-                        ByteBuffer.wrap(arpReply.serialize())));
-                context.block();
-            }
-        });
+        packetService.emit(new DefaultOutboundPacket(
+                packetReceivedFrom.deviceId(),
+                treatment,
+                ByteBuffer.wrap(arpReply.serialize())));
+        context.block();
     }
 
     private void handleFtpPackets(PacketContext context, Ethernet ethPacket, ConnectPoint packetReceivedFrom) {
-        IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
-        if (ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
-            return;
-        }
-        log.info("--------------------------------------------------------------");
-
-        TCP tcpPacket = (TCP) ipv4Packet.getPayload();
-        int srcPort = tcpPacket.getSourcePort();
-        int dstPort = tcpPacket.getDestinationPort();
-
-        // We ignore packets from/to port 20 since they are handled by the FWD app.
-        // A FTP sever is responsible for setting up a separate TCP connection for data transfer on port 20,
-        // so we do not need to worry about the shared IP address.
-        if (dstPort != FTP_SERVER_PORT) {
-            return;
-        }
-
         MacAddress srcMac = ethPacket.getSourceMAC();
         MacAddress dstMac = ethPacket.getDestinationMAC();
+
+        IPv4 ipv4Packet = (IPv4) ethPacket.getPayload();
         Ip4Address srcIp = Ip4Address.valueOf(ipv4Packet.getSourceAddress());
         Ip4Address dstIp = Ip4Address.valueOf(ipv4Packet.getDestinationAddress());
 
-        // For debugging purposes
-        log.info("Received FTP packet from device:port {}:{}", packetReceivedFrom.deviceId(), packetReceivedFrom.port());
-        log.info("ETH: srcMAC: {}, dstMAC: {}", srcMac, dstMac);
-        log.info("IP: srcIP: {}, dstIP: {}, checksum: {}", srcIp, dstIp, ipv4Packet.getChecksum());
-        log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}", srcPort, dstPort,
-                tcpPacket.getChecksum(), tcpPacket.getSequence(), tcpPacket.getAcknowledge());
-
         // Check if the packet is for the current shared IP address
         if (dstIp.equals(sharedAddress)) {
-            log.info("Packet with shared address: {} as a destination", sharedAddress);
+            log.info("--------------------------------------------------------------");
+            log.info("Received FTP packet from device:port {}:{}", packetReceivedFrom.deviceId(), packetReceivedFrom.port());
+            log.info("ETH: srcMAC: {}, dstMAC: {}", srcMac, dstMac);
+            log.info("IP: srcIP: {}, dstIP: {}, checksum: {}", srcIp, dstIp, ipv4Packet.getChecksum());
+
+            if (ipv4Packet.getProtocol() != IPv4.PROTOCOL_TCP) {
+                context.block();
+                return;
+            }
+
+            TCP tcpPacket = (TCP) ipv4Packet.getPayload();
+            int srcPort = tcpPacket.getSourcePort();
+            int dstPort = tcpPacket.getDestinationPort();
+
+            // We ignore packets from/to port 20 since they are handled by the FWD app.
+            // A FTP sever is responsible for setting up a separate TCP connection for data transfer on port 20,
+            // so we do not need to worry about the shared IP address.
+            if (dstPort != FTP_SERVER_PORT &&
+                    (srcPort != 20 && dstPort != 20)) {
+                context.block();
+                return;
+            }
+
+            // For debugging purposes
+            log.info("TCP: srcPort: {}, dstPort: {}, checksum: {}, seq: {}, ack: {}", srcPort, dstPort,
+                    tcpPacket.getChecksum(), tcpPacket.getSequence(), tcpPacket.getAcknowledge());
 
             Host srcHost = getHost(srcMac);
-            Host dstHost = getHost(dstMac);
 
             // Check if it is the first device on the packet path
             if (packetReceivedFrom.deviceId().equals(srcHost.location().deviceId()) &&
@@ -357,27 +346,25 @@ public class FtpApp {
             ) {
                 log.info("Packet arrived at first device on its path");
 
-                // Need to know the redirect server IP that was given by an ARP.
-                // Redirect server IP may be cached at host so it won't be present in the map.
-                // In such a case, need to add it manually.
-                if (!clientsToRedirectIps.containsKey(srcIp)) {
-                    Ip4Address redirectIp = dstHost.ipAddresses()
-                            .stream()
-                            .filter(ipAddress -> serversAssignedToSharedAddress.contains(ipAddress.getIp4Address()))
-                            .iterator().next().getIp4Address();
-                    log.info("Add client: {} to redirect IP: {} mapping", srcIp, redirectIp);
-                    clientsToRedirectIps.put(srcIp, redirectIp);
-                }
-
                 // Check if there is an active FTP session for the IPs and port
                 FtpSessionKey sessionKey = new FtpSessionKey(PortNumber.portNumber(srcPort), srcIp, dstIp);
                 if (!activeFtpSessions.containsKey(sessionKey)) {
-                    log.info("Add new FTP session: key: {} value: {}", sessionKey, clientsToRedirectIps.get(srcIp));
-                    activeFtpSessions.put(sessionKey, clientsToRedirectIps.get(srcIp));
+                    Optional<Ip4Address> optionalRedirectIp = selectNextServerIpAddress();
+                    if (optionalRedirectIp.isPresent()) {
+                        Ip4Address redirectIp = optionalRedirectIp.get();
+                        log.info("Add new FTP session: key: {} value: {}", sessionKey, redirectIp);
+                        activeFtpSessions.put(sessionKey, redirectIp);
+                    } else {
+                        log.warn("No IP for redirect.");
+                        context.block();
+                        return;
+                    }
                 }
-
                 log.info("Current active FTP sessions: {}", activeFtpSessions);
-                log.info("Current client-server redirects: {}", clientsToRedirectIps);
+
+                Ip4Address newDstIp = activeFtpSessions.get(sessionKey);
+                Host dstHost = hostService.getHostsByIp(newDstIp).iterator().next();
+                MacAddress newDstMac = dstHost.mac();
 
                 // Get available paths that lead to the destination
                 Set<Path> paths = topologyService.getPaths(topologyService.currentTopology(),
@@ -391,7 +378,6 @@ public class FtpApp {
                     return;
                 }
 
-                Ip4Address newDstIp = activeFtpSessions.get(sessionKey);
                 pickForwardPathIfPossible(paths, packetReceivedFrom.port())
                         .ifPresent(path -> {
                             PortNumber outPort = path.src().port();
@@ -404,7 +390,6 @@ public class FtpApp {
                             TrafficSelector selector = DefaultTrafficSelector.builder()
                                     .matchInPort(packetReceivedFrom.port())
                                     .matchEthSrc(srcMac)
-                                    .matchEthDst(dstMac)
                                     .matchEthType(Ethernet.TYPE_IPV4)
                                     .matchIPSrc(srcIpPrefix)
                                     .matchIPDst(dstIpPrefix)
@@ -415,6 +400,7 @@ public class FtpApp {
 
                             TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                                     .setIpDst(newDstIp)
+                                    .setEthDst(newDstMac)
                                     .setOutput(outPort)
                                     .build();
 
@@ -435,7 +421,7 @@ public class FtpApp {
 
                             TrafficSelector symmetricalSelector = DefaultTrafficSelector.builder()
                                     .matchInPort(outPort)
-                                    .matchEthSrc(dstMac)
+                                    .matchEthSrc(newDstMac)
                                     .matchEthDst(srcMac)
                                     .matchEthType(Ethernet.TYPE_IPV4)
                                     .matchIPSrc(newDstIpPrefix)
@@ -466,6 +452,7 @@ public class FtpApp {
                             ipv4Packet.setDestinationAddress(newDstIp.toInt());
                             ipv4Packet.resetChecksum();
                             ethPacket.setPayload(ipv4Packet);
+                            ethPacket.setDestinationMACAddress(newDstMac);
                             ethPacket.resetChecksum();
                             packetService.emit(new DefaultOutboundPacket(
                                     packetReceivedFrom.deviceId(),

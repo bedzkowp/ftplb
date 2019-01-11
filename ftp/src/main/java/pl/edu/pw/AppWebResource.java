@@ -38,8 +38,6 @@ import java.util.Map;
 @Path("")
 public class AppWebResource extends AbstractWebResource {
 
-    private final Logger log = LoggerFactory.getLogger(getClass());
-
     protected FtpApp ftpApp = get(FtpApp.class);
 
     @GET
@@ -62,7 +60,7 @@ public class AppWebResource extends AbstractWebResource {
     @DELETE
     @Path("/shared-address")
     public Response deleteSharedAddress() {
-        setSharedAddress(null);
+        ftpApp.setSharedAddress(null);
         return Response.ok().build();
     }
 
