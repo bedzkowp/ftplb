@@ -19,8 +19,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.onlab.packet.Ip4Address;
 import org.onosproject.rest.AbstractWebResource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
@@ -44,16 +42,26 @@ public class AppWebResource extends AbstractWebResource {
     @Path("/shared-address")
     @Produces(MediaType.APPLICATION_JSON)
     public Response getSharedAddress() {
-        ObjectNode node = mapper()
-                .createObjectNode()
-                .put("sharedAddress", ftpApp.getSharedAddress().toString());
+        ObjectNode node = mapper().createObjectNode();
+        Ip4Address sharedAddress = ftpApp.getSharedAddress();
+        if (sharedAddress != null) {
+            node.put("sharedAddress", sharedAddress.toString());
+        }
         return Response.ok(node).build();
     }
 
     @PUT
     @Path("/shared-address/{address}")
     public Response setSharedAddress(@PathParam("address") String address) {
-        ftpApp.setSharedAddress(Ip4Address.valueOf(address));
+        Ip4Address newSharedAddress = Ip4Address.valueOf(address);
+        try {
+            ftpApp.validateSharedIpAddress(newSharedAddress);
+        } catch (FtpApp.ConflictException e) {
+            return Response.status(Response.Status.CONFLICT).entity(e.getMessage()).build();
+        } catch (FtpApp.NotFoundException e) {
+            return Response.status(Response.Status.NOT_FOUND).entity(e.getMessage()).build();
+        }
+        ftpApp.setSharedAddress(newSharedAddress);
         return Response.ok().build();
     }
 
@@ -79,7 +87,15 @@ public class AppWebResource extends AbstractWebResource {
     @PUT
     @Path("/servers/{address}")
     public Response assignServer(@PathParam("address") String address) {
-        ftpApp.assignServerToSharedAddress(Ip4Address.valueOf(address));
+        Ip4Address serverIp = Ip4Address.valueOf(address);
+        try {
+            ftpApp.validateFtpServerAddress(serverIp);
+        } catch (FtpApp.ConflictException e) {
+            return Response.status(Response.Status.CONFLICT).entity(e.getMessage()).build();
+        } catch (FtpApp.NotFoundException e) {
+            return Response.status(Response.Status.NOT_FOUND).entity(e.getMessage()).build();
+        }
+        ftpApp.assignServerToSharedAddress(serverIp);
         return Response.ok().build();
     }
 

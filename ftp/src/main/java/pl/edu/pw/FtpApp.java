@@ -108,6 +108,11 @@ public class FtpApp {
     private static final int FLOW_TIMEOUT_IN_SEC = 900;
     /** Standard server port for a FTP session setup */
     private static final int FTP_SERVER_PORT = 21;
+    /** Locally administered MAC address for ARP handling. */
+    // No manufactured host machine can have this address
+    private static final MacAddress SHARED_MAC_ADDRESS = MacAddress.valueOf("02:00:00:00:00:01");
+    /** Network mask */
+    private static final int NETWORK_MASK = 24;
 
     /** Shared IP address */
     private Ip4Address sharedAddress;
@@ -284,7 +289,8 @@ public class FtpApp {
             return;
         }
 
-        Ethernet arpReply = ARP.buildArpReply(targetAddress, MacAddress.ZERO, ethPacket);
+
+        Ethernet arpReply = ARP.buildArpReply(targetAddress, SHARED_MAC_ADDRESS, ethPacket);
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                 .setOutput(packetReceivedFrom.port())
                 .build();
@@ -497,5 +503,52 @@ public class FtpApp {
             Ip4Address value = activeFtpSessions.remove(sessionKey);
             log.info("Removed session: {}, value: {} due to flow removal", sessionKey, value);
         }
+    }
+
+    public void validateSharedIpAddress(Ip4Address sharedIp) throws ConflictException, NotFoundException {
+        if (hostService.getHostsByIp(sharedIp).size() != 0) {
+            throw new ConflictException("IP: " + sharedIp + " address already allocated.");
+        }
+
+        if (serversAssignedToSharedAddress.size() > 0) {
+            Ip4Address serverIp = serversAssignedToSharedAddress.get(0);
+            Ip4Prefix serverIpPrefix = Ip4Prefix.valueOf(serverIp.toInt(), NETWORK_MASK);
+            Ip4Prefix sharedIpPrefix = Ip4Prefix.valueOf(sharedIp.toInt(), NETWORK_MASK);
+            log.info("Server IP (network) prefix: {}, shared IP prefix: {}", serverIpPrefix, sharedIpPrefix);
+            if (!sharedIpPrefix.equals(serverIpPrefix)) {
+                throw new ConflictException("Shared IP prefix must correspond to the servers IP prefixes");
+            }
+        }
+    }
+
+    public void validateFtpServerAddress(Ip4Address serverIp) throws ConflictException, NotFoundException {
+        if (hostService.getHostsByIp(serverIp).size() == 0) {
+            throw new NotFoundException("Server with IP: " + serverIp + " not found");
+        }
+
+        if (sharedAddress != null) {
+            Ip4Prefix sharedAddressPrefix = Ip4Prefix.valueOf(sharedAddress.toInt(), NETWORK_MASK);
+            Ip4Prefix serverIpPrefix = Ip4Prefix.valueOf(serverIp.toInt(), NETWORK_MASK);
+            log.info("Server IP (network) prefix: {}, shared address prefix: {}", serverIpPrefix, sharedAddressPrefix);
+            if (!serverIpPrefix.equals(sharedAddressPrefix)) {
+                throw new ConflictException("Server IP prefix must correspond to the shared IP prefix");
+            }
+        }
+    }
+
+    public class ConflictException extends RuntimeException {
+
+        ConflictException(String message) {
+            super(message);
+        }
+
+    }
+
+    public class NotFoundException extends RuntimeException {
+
+        NotFoundException(String message) {
+            super(message);
+        }
+
     }
 }
