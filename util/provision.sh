@@ -6,7 +6,7 @@ sed -i -e 's|http://archive.ubuntu.com/ubuntu|http://ftp.icm.edu.pl/pub/Linux/ub
 systemctl mask openvswitch-testcontroller.service
 
 DEBIAN_FRONTEND=noninteractive apt-get -y -q update
-DEBIAN_FRONTEND=noninteractive apt-get install -y -q tree tmux tcpdump nmap mininet vsftpd openvswitch-testcontroller curl
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q tree tmux tcpdump nmap mininet vsftpd openvswitch-testcontroller curl python-ipaddress python-requests arping
 
 systemctl unmask openvswitch-testcontroller.service
 systemctl disable openvswitch-testcontroller.service
