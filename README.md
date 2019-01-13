@@ -1,4 +1,78 @@
 ```
+Uruchomienie testow:
+
+user@host:~/ftplb$ vagrant up
+(...)
+
+vagrant@ftplb:~$ sudo python mininet/ftp.py
+['mininet/ftp.py']
+*** Creating network
+*** Adding controller
+*** Adding hosts:
+ftp1 ftp2 ftp3 h1 h2 
+*** Adding switches:
+s1 s2 
+*** Adding links:
+(ftp1, s1) (ftp2, s1) (ftp3, s1) (h1, s2) (h2, s2) (s1, s2) 
+*** Configuring hosts
+ftp1 ftp2 ftp3 h1 h2 
+*** Starting controller
+c0 
+*** Starting 2 switches
+s1 s2 ...
+*** FTPs starting ***
+*** FTP: ftp1 10.0.1.1 conf: /tmp/vsftpd-ftp1.conf
+*** FTP: ftp2 10.0.1.2 conf: /tmp/vsftpd-ftp2.conf
+*** FTP: ftp3 10.0.1.3 conf: /tmp/vsftpd-ftp3.conf
+*** FTPs started ***
+*** Ping: testing ping reachability
+ftp1 -> ftp2 ftp3 h1 h2 
+ftp2 -> ftp1 ftp3 h1 h2 
+ftp3 -> ftp1 ftp2 h1 h2 
+h1 -> ftp1 ftp2 ftp3 h2 
+h2 -> ftp1 ftp2 ftp3 h1 
+*** Results: 0% dropped (20/20 received)
+*** TEST ***
+
+--- Tests for: h1 - 10.0.2.1 ---
+test_connect (__main__.TestServerPool) ... ok
+test_file_transfer (__main__.TestServerPool) ... ok
+test_connect (__main__.TestVirtualIP) ... ok
+test_connect_concurrent_target_change (__main__.TestVirtualIP) ... ok
+test_connect_sequential_target_change (__main__.TestVirtualIP) ... ok
+test_file_transfer (__main__.TestVirtualIP) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 9.980s
+
+OK
+
+--- Tests for: h2 - 10.0.2.2 ---
+test_connect (__main__.TestServerPool) ... ok
+test_file_transfer (__main__.TestServerPool) ... ok
+test_connect (__main__.TestVirtualIP) ... ok
+test_connect_concurrent_target_change (__main__.TestVirtualIP) ... ok
+test_connect_sequential_target_change (__main__.TestVirtualIP) ... ok
+test_file_transfer (__main__.TestVirtualIP) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 9.711s
+
+OK
+
+*** Stopping 1 controllers
+c0 
+*** Stopping 6 links
+......
+*** Stopping 2 switches
+s1 s2 
+*** Stopping 5 hosts
+ftp1 ftp2 ftp3 h1 h2 
+*** Done
+
+
+
+
 CLI ONOS i instalacja apki:
 
 portfel@black:~/ftplb$ vagrant up
