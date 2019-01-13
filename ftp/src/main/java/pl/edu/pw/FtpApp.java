@@ -112,7 +112,7 @@ public class FtpApp {
     // No manufactured host machine can have this address
     private static final MacAddress SHARED_MAC_ADDRESS = MacAddress.valueOf("02:00:00:00:00:01");
     /** Network mask */
-    private static final int NETWORK_MASK = 24;
+    private static final int NETWORK_MASK = 8;
 
     /** Shared IP address */
     private Ip4Address sharedAddress;
@@ -238,9 +238,9 @@ public class FtpApp {
             	int index = random.nextInt(serversAssignedToSharedAddress.size());
             	redirectIp = serversAssignedToSharedAddress.get(index);
 	    } while (redirectIp.equals(lastServersAssignedToSharedAddress));
+        }
 	    lastServersAssignedToSharedAddress = redirectIp;
             return Optional.of(redirectIp);
-        }
     }
 
     private Optional<Path> pickForwardPathIfPossible(Set<Path> paths, PortNumber notToPort) {

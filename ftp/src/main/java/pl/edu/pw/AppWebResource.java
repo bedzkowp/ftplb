@@ -26,6 +26,7 @@ import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.Consumes;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.util.Map;
@@ -39,7 +40,7 @@ public class AppWebResource extends AbstractWebResource {
     protected FtpApp ftpApp = get(FtpApp.class);
 
     @GET
-    @Path("/shared-address")
+    @Path("/sharedaddr")
     @Produces(MediaType.APPLICATION_JSON)
     public Response getSharedAddress() {
         ObjectNode node = mapper().createObjectNode();
@@ -51,7 +52,7 @@ public class AppWebResource extends AbstractWebResource {
     }
 
     @PUT
-    @Path("/shared-address/{address}")
+    @Path("/sharedaddr/{address}")
     public Response setSharedAddress(@PathParam("address") String address) {
         Ip4Address newSharedAddress = Ip4Address.valueOf(address);
         try {
@@ -66,7 +67,7 @@ public class AppWebResource extends AbstractWebResource {
     }
 
     @DELETE
-    @Path("/shared-address")
+    @Path("/sharedaddr")
     public Response deleteSharedAddress() {
         ftpApp.setSharedAddress(null);
         return Response.ok().build();
