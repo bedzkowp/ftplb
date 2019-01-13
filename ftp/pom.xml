@@ -19,7 +19,7 @@
 
     <groupId>pl.edu.pw</groupId>
     <artifactId>ftp</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.1-SNAPSHOT</version>
     <packaging>bundle</packaging>
 
     <description>ONOS REST API bundle archetype</description>
@@ -31,9 +31,9 @@
 
         <web.context>/onos/ftp</web.context>
         <api.version>1.0.0</api.version>
-        <api.title>Sample app REST API</api.title>
+        <api.title>Ftplb REST API</api.title>
         <api.description>
-            Sample application REST API
+            FTP Load Balancer REST API
         </api.description>
         <api.package>pl.edu.pw</api.package>
 
