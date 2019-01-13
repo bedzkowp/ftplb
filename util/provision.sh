@@ -6,7 +6,7 @@ sed -i -e 's|http://archive.ubuntu.com/ubuntu|http://ftp.icm.edu.pl/pub/Linux/ub
 systemctl mask openvswitch-testcontroller.service
 
 DEBIAN_FRONTEND=noninteractive apt-get -y -q update
-DEBIAN_FRONTEND=noninteractive apt-get install -y -q tree tmux tcpdump nmap mininet vsftpd openvswitch-testcontroller curl python-ipaddress python-requests arping
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q tree tmux tcpdump nmap mininet vsftpd openvswitch-testcontroller curl jq python-ipaddress python-requests arping
 
 systemctl unmask openvswitch-testcontroller.service
 systemctl disable openvswitch-testcontroller.service
@@ -47,3 +47,10 @@ rm -fr /tmp/onosapp
 
 docker exec -t onos /root/client.sh app activate org.onosproject.fwd org.onosproject.openflow
 
+oar_url=$(curl -s https://api.github.com/repos/bedzkowp/ftplb/releases/latest | jq --raw-output '.assets[0] | .browser_download_url')
+
+wget $oar_url
+
+/usr/local/bin/onos-app 127.0.0.1 install "${oar_url##*/}"
+
+docker exec -t onos /root/client.sh app activate pl.edu.pw.ftplb

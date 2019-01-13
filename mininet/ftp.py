@@ -45,7 +45,7 @@ def ftpd( network ):
   if '--cli' in sys.argv:
     CLI( network )
   else:
-    info( '*** TEST ***' )
+    info( '*** TEST ***\n\n' )
     # time.sleep(5)
     run_tests( network )
     
@@ -104,8 +104,8 @@ def run_tests( network ):
 
   servers = filter( lambda x: x.name.startswith( 'ftp' ), network.hosts)
   clients = filter( lambda x: x.name.startswith( 'h' ), network.hosts)
-  print(servers)
-  print(clients)
+  # print(servers)
+  # print(clients)
  
   clear_servers()
   map(lambda s: put_server(s.IP()), servers)
@@ -113,6 +113,7 @@ def run_tests( network ):
 
   time.sleep(1)
   for client in clients:
+    info( '--- Tests for: {} - {} ---\n'.format( client.name, client.IP() ))
     print(client.cmd( 'FTPLB_VIP="{}" FTPLB_IPS="{}" /usr/bin/python /home/vagrant/mininet/test.py -vv'.format( get_sharedaddr(), ' '.join([s.IP() for s in servers]) )))
 
 if __name__ == '__main__':

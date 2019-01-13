@@ -97,7 +97,7 @@ class TestVirtualIP(unittest.TestCase):
 
   def tearDown(self):
     elapsed = time.time() - self._started_at
-    print('{} ({}s)'.format(self.id(), round(elapsed, 2)))
+    #print('{} ({}s)'.format(self.id(), round(elapsed, 2)))
 
   def test_connect(self):
     self.assertIn(do_connect_close(str(self.virtual_ip)), map(str, self.targets))
@@ -125,7 +125,7 @@ class TestVirtualIP(unittest.TestCase):
 
     map(close, ftps)
     
-    print(banner_ips)
+    #print(banner_ips)
 
     for i in range(1, len(banner_ips)):
       self.assertNotEqual(banner_ips[i-1], banner_ips[i])
