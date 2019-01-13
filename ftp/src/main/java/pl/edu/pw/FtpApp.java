@@ -118,6 +118,8 @@ public class FtpApp {
     private Ip4Address sharedAddress;
     /** FTP servers assigned to the shared IP address */
     private List<Ip4Address> serversAssignedToSharedAddress = new ArrayList<>();
+    private Ip4Address lastServersAssignedToSharedAddress = null;
+
     /** FTP session mapping to a redirect IP address */
     private Map<FtpSessionKey, Ip4Address> activeFtpSessions = new HashMap<>();
 
@@ -226,11 +228,17 @@ public class FtpApp {
     }
 
     private Optional<Ip4Address> selectNextServerIpAddress() {
+	Ip4Address redirectIp = null;
         if (serversAssignedToSharedAddress.size() == 0) {
             return Optional.empty();
+	} else if (serversAssignedToSharedAddress.size() == 1 ) {
+	    redirectIp = serversAssignedToSharedAddress.get(0);
         } else {
-            int index = random.nextInt(serversAssignedToSharedAddress.size());
-            Ip4Address redirectIp = serversAssignedToSharedAddress.get(index);
+	    do { 
+            	int index = random.nextInt(serversAssignedToSharedAddress.size());
+            	redirectIp = serversAssignedToSharedAddress.get(index);
+	    } while (redirectIp.equals(lastServersAssignedToSharedAddress));
+	    lastServersAssignedToSharedAddress = redirectIp;
             return Optional.of(redirectIp);
         }
     }
